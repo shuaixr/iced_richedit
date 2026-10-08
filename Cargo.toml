@@ -1,0 +1,13 @@
+[package]
+name = "iced_richedit"
+version = "0.1.0"
+edition = "2024"
+description = "A rich text editor widget for iced"
+license = "MIT OR Apache-2.0"
+keywords = ["iced", "rich-text", "editor", "widget", "gui"]
+categories = ["gui", "text-editors"]
+
+[dependencies]
+iced = { version = "0.14", default-features = false, features = ["advanced", "thread-pool"] }
+prosemirror = "=0.5.2"
+serde_json = "1"
