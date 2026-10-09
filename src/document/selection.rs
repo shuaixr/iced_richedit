@@ -1,4 +1,4 @@
-use super::Position;
+use crate::document::Position;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TextSelection {
