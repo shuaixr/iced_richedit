@@ -1,8 +1,8 @@
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 
 use prosemirror::{
-    dynamic::{DynamicMark, DynamicNode, DynamicSchema},
-    model::Node,
+    dynamic::{DynamicMark, DynamicNode, DynamicSchema, types::Dyn},
+    model::{MarkSet, Node},
 };
 
 use crate::document::{DocumentError, Mark};
@@ -14,25 +14,21 @@ pub(crate) struct DocumentSchema {
 impl DocumentSchema {
     pub(crate) fn mark(&self, mark: &Mark) -> Result<DynamicMark, DocumentError> {
         self.scope(|| {
-            let value = match mark {
-                Mark::Strong => serde_json::json!({ "type": "strong" }),
-                Mark::Emphasis => serde_json::json!({ "type": "em" }),
-                Mark::Underline => serde_json::json!({ "type": "underline" }),
-                Mark::Code => serde_json::json!({ "type": "code" }),
-                Mark::Link { href, title } => serde_json::json!({
-                    "type": "link",
-                    "attrs": {
-                        "href": href,
-                        "title": title
-                    }
-                }),
-            };
-
             self.inner
-                .mark_from_json(&value)
+                .mark_from_json(&mark.to_json())
                 .map_err(|error| DocumentError::InvalidMark(error.to_string()))
         })
     }
+
+    pub(crate) fn public_mark(&self, mark: &DynamicMark) -> Result<Mark, DocumentError> {
+        self.scope(|| {
+            let value = serde_json::to_value(mark)
+                .map_err(|error| DocumentError::InvalidMark(error.to_string()))?;
+
+            Mark::from_json(&value)
+        })
+    }
+
     pub(crate) fn scope<R>(&self, operation: impl FnOnce() -> R) -> R {
         let outcome = self
             .inner
@@ -56,14 +52,34 @@ impl DocumentSchema {
             Ok(node)
         })
     }
+    pub(crate) fn text_node_with_marks(
+        &self,
+        text: &str,
+        marks: &[Mark],
+    ) -> Result<DynamicNode, DocumentError> {
+        self.scope(|| {
+            let set = self.mark_set(marks)?;
+            Ok(self.inner.text(text).mark(set))
+        })
+    }
+    pub(super) fn mark_set(&self, marks: &[Mark]) -> Result<MarkSet<Dyn>, DocumentError> {
+        self.scope(|| {
+            let mut set = MarkSet::<Dyn>::new();
+
+            for mark in marks {
+                let dynamic_mark = self.mark(mark)?;
+                set.add(&dynamic_mark);
+            }
+
+            Ok(set)
+        })
+    }
+
     pub(crate) fn new() -> Result<Self, DocumentError> {
         let inner = DynamicSchema::from_json(&schema_spec())
             .map_err(|error| DocumentError::InvalidSchema(error.to_string()))?;
 
         Ok(Self { inner })
-    }
-    pub(crate) fn text_node(&self, text: &str) -> DynamicNode {
-        self.scope(|| self.inner.text(text))
     }
 }
 

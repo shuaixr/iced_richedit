@@ -84,6 +84,14 @@ impl EditorState {
 
         let from = self.selection.from();
         let to = self.selection.to();
+        let marks = match &self.stored_marks {
+            Some(marks) => marks.clone(),
+            None => self
+                .document
+                .marks_at(from)
+                .map_err(EditorError::Document)?,
+        };
+        let stored_marks = self.stored_marks.clone();
         let mut transaction = self.document.transaction();
 
         if !self.selection.is_empty() {
@@ -93,12 +101,12 @@ impl EditorState {
         }
 
         transaction
-            .insert_text(from, text)
+            .insert_text_with_marks(from, text, &marks)
             .map_err(EditorError::Document)?;
         let new_offset = from.utf16_offset() + text.encode_utf16().count();
         let selection = TextSelection::cursor(Position::from_utf16_offset(new_offset));
 
-        self.dispatch_transaction(transaction.finish(), selection, None)
+        self.dispatch_transaction(transaction.finish(), selection, stored_marks)
     }
 }
 
@@ -546,6 +554,209 @@ mod tests {
 
         assert_eq!(editor_state.document().text(), "Hello");
         assert_eq!(editor_state.selection(), selection);
+        assert_eq!(editor_state.stored_marks(), Some(&[Mark::Strong][..]));
+    }
+
+    #[test]
+    fn insert_text_inherits_strong_from_cursor_context() {
+        let document = Document::from_json(
+            r#"{
+                "type": "doc",
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Hello",
+                                "marks": [{ "type": "strong" }]
+                            }
+                        ]
+                    }
+                ]
+            }"#,
+        )
+        .expect("document must be valid");
+
+        let mut editor_state = EditorState::new(document).expect("editor state must be valid");
+        let selection = TextSelection::cursor(Position::from_utf16_offset(2));
+        editor_state
+            .set_selection(selection)
+            .expect("selection must be valid");
+        editor_state
+            .insert_text("y")
+            .expect("insertion must succeed");
+        let actual: serde_json::Value = serde_json::from_str(
+            &editor_state
+                .document()
+                .to_json()
+                .expect("document must serialize"),
+        )
+        .expect("output must be valid JSON");
+
+        assert_eq!(
+            actual,
+            serde_json::json!({
+                "type": "doc",
+                "content": [{
+                    "type": "paragraph",
+                    "content": [{
+                        "type": "text",
+                        "text": "Hyello",
+                        "marks": [{ "type": "strong" }]
+                    }]
+                }]
+            })
+        );
+        assert_eq!(editor_state.document().text(), "Hyello");
+        assert_eq!(
+            editor_state.selection(),
+            TextSelection::cursor(Position::from_utf16_offset(3))
+        );
+        assert!(editor_state.stored_marks().is_none());
+    }
+
+    #[test]
+    fn insert_text_with_empty_stored_marks_does_not_inherit_strong() {
+        let document = Document::from_json(
+            r#"{
+                "type": "doc",
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Hello",
+                                "marks": [{ "type": "strong" }]
+                            }
+                        ]
+                    }
+                ]
+            }"#,
+        )
+        .expect("document must be valid");
+
+        let mut editor_state = EditorState::new(document).expect("editor state must be valid");
+        let selection = TextSelection::cursor(Position::from_utf16_offset(2));
+        editor_state
+            .set_selection(selection)
+            .expect("selection must be valid");
+        editor_state.stored_marks = Some(vec![]);
+        editor_state
+            .insert_text("y")
+            .expect("insertion must succeed");
+        let actual: serde_json::Value = serde_json::from_str(
+            &editor_state
+                .document()
+                .to_json()
+                .expect("document must serialize"),
+        )
+        .expect("output must be valid JSON");
+
+        assert_eq!(
+            actual,
+            serde_json::json!({
+                "type": "doc",
+                "content": [{
+                    "type": "paragraph",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "H",
+                            "marks": [{ "type": "strong" }]
+                        },
+                        {
+                            "type": "text",
+                            "text": "y"
+                        },
+                        {
+                            "type": "text",
+                            "text": "ello",
+                            "marks": [{ "type": "strong" }]
+                        }
+                    ]
+                }]
+            })
+        );
+        assert_eq!(editor_state.document().text(), "Hyello");
+        assert_eq!(
+            editor_state.selection(),
+            TextSelection::cursor(Position::from_utf16_offset(3))
+        );
+        assert_eq!(editor_state.stored_marks(), Some(&[][..]));
+    }
+
+    #[test]
+    fn insert_text_preserves_explicit_strong_across_consecutive_inputs() {
+        let document = Document::from_json(
+            r#"{
+                "type": "doc",
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ]
+            }"#,
+        )
+        .expect("document must be valid");
+
+        let mut editor_state = EditorState::new(document).expect("editor state must be valid");
+        let selection = TextSelection::cursor(Position::from_utf16_offset(2));
+        editor_state
+            .set_selection(selection)
+            .expect("selection must be valid");
+        editor_state.stored_marks = Some(vec![Mark::Strong]);
+        editor_state
+            .insert_text("y")
+            .expect("insertion must succeed");
+        assert_eq!(editor_state.stored_marks(), Some(&[Mark::Strong][..]));
+        editor_state
+            .insert_text("!")
+            .expect("insertion must succeed");
+        let actual: serde_json::Value = serde_json::from_str(
+            &editor_state
+                .document()
+                .to_json()
+                .expect("document must serialize"),
+        )
+        .expect("output must be valid JSON");
+
+        assert_eq!(
+            actual,
+            serde_json::json!({
+                "type": "doc",
+                "content": [{
+                    "type": "paragraph",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "H"
+                        },
+                        {
+                            "type": "text",
+                            "text": "y!",
+                            "marks": [{ "type": "strong" }]
+                        },
+                        {
+                            "type": "text",
+                            "text": "ello"
+                        }
+                    ]
+                }]
+            })
+        );
+        assert_eq!(editor_state.document().text(), "Hy!ello");
+        assert_eq!(
+            editor_state.selection(),
+            TextSelection::cursor(Position::from_utf16_offset(4))
+        );
         assert_eq!(editor_state.stored_marks(), Some(&[Mark::Strong][..]));
     }
 }

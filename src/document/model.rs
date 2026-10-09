@@ -6,7 +6,7 @@ use prosemirror::{
 };
 
 use crate::document::{
-    DocumentError, Position, TextSelection, schema::DocumentSchema, transaction::Transaction,
+    DocumentError, Mark, Position, TextSelection, schema::DocumentSchema, transaction::Transaction,
 };
 
 pub struct Document {
@@ -91,11 +91,31 @@ impl Document {
             Ok(())
         })
     }
+
+    pub(crate) fn marks_at(&self, position: Position) -> Result<Vec<Mark>, DocumentError> {
+        self.schema.scope(|| {
+            let offset = position.utf16_offset();
+
+            let resolved = ResolvedPos::<Dyn>::resolve(&self.node, offset)
+                .map_err(|_| DocumentError::InvalidPosition { position: offset })?;
+
+            if !resolved.parent().inline_content() {
+                return Err(DocumentError::InvalidPosition { position: offset });
+            }
+
+            let marks = resolved.marks();
+
+            marks
+                .iter()
+                .map(|mark| self.schema.public_mark(mark))
+                .collect()
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::document::DocumentError;
+    use crate::document::{DocumentError, Mark, Position};
 
     use super::Document;
 
@@ -184,5 +204,67 @@ mod tests {
             document.validate_selection(selection),
             Err(DocumentError::InvalidPosition { position: 10 })
         ));
+    }
+
+    #[test]
+    fn marks_at_returns_strong_inside_marked_text() {
+        let document = Document::from_json(
+            r#"{
+                "type": "doc",
+                "content": [{
+                    "type": "paragraph",
+                    "content": [{
+                        "type": "text",
+                        "text": "Hello",
+                        "marks": [{ "type": "strong" }]
+                    }]
+                }]
+            }"#,
+        )
+        .expect("document must be valid");
+
+        let marks = document
+            .marks_at(Position::from_utf16_offset(2))
+            .expect("marks_at must succeed");
+
+        assert_eq!(marks, vec![Mark::Strong]);
+    }
+
+    #[test]
+    fn marks_at_preserves_link_attrs_and_excludes_non_inclusive_end() {
+        let document = Document::from_json(
+            r#"{
+                "type": "doc",
+                "content": [{
+                    "type": "paragraph",
+                    "content": [{
+                        "type": "text",
+                        "text": "Hello",
+                        "marks": [{
+                            "type": "link",
+                            "attrs": { "href": "https://example.com", "title": null }
+                        }]
+                    }]
+                }]
+            }"#,
+        )
+        .expect("document must be valid");
+
+        let marks = document
+            .marks_at(Position::from_utf16_offset(5))
+            .expect("marks_at must succeed");
+        assert!(
+            document
+                .marks_at(Position::from_utf16_offset(6))
+                .expect("link end position must be valid")
+                .is_empty()
+        );
+        assert_eq!(
+            marks,
+            vec![Mark::Link {
+                href: "https://example.com".to_owned(),
+                title: None
+            }]
+        );
     }
 }

@@ -38,12 +38,21 @@ impl Transaction {
         position: Position,
         text: &str,
     ) -> Result<&mut Self, DocumentError> {
+        self.insert_text_with_marks(position, text, &[])
+    }
+
+    pub(crate) fn insert_text_with_marks(
+        &mut self,
+        position: Position,
+        text: &str,
+        marks: &[Mark],
+    ) -> Result<&mut Self, DocumentError> {
         if text.is_empty() {
             return Ok(self);
         }
 
         let offset = self.validate_position(position)?;
-        let text_node = self.schema.text_node(text);
+        let text_node = self.schema.text_node_with_marks(text, marks)?;
         let content = Fragment::from(vec![text_node]);
         let previous_step_count = self.transform.steps.len();
 
