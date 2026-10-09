@@ -1,5 +1,5 @@
 use crate::{
-    document::{Document, Mark, TextSelection, TransactionResult},
+    document::{Document, Mark, Position, TextSelection, TransactionResult},
     editor::error::EditorError,
 };
 
@@ -56,6 +56,7 @@ impl EditorState {
 
         Ok(())
     }
+
     pub fn delete_selection(&mut self) -> Result<(), EditorError> {
         if self.selection.is_empty() {
             return Ok(());
@@ -75,7 +76,32 @@ impl EditorState {
 
         self.dispatch_transaction(result, selection, None)
     }
+
+    pub fn insert_text(&mut self, text: &str) -> Result<(), EditorError> {
+        if text.is_empty() {
+            return Ok(());
+        }
+
+        let from = self.selection.from();
+        let to = self.selection.to();
+        let mut transaction = self.document.transaction();
+
+        if !self.selection.is_empty() {
+            transaction
+                .delete_range(from, to)
+                .map_err(EditorError::Document)?;
+        }
+
+        transaction
+            .insert_text(from, text)
+            .map_err(EditorError::Document)?;
+        let new_offset = from.utf16_offset() + text.encode_utf16().count();
+        let selection = TextSelection::cursor(Position::from_utf16_offset(new_offset));
+
+        self.dispatch_transaction(transaction.finish(), selection, None)
+    }
 }
+
 #[cfg(test)]
 mod tests {
     use crate::{
@@ -116,6 +142,7 @@ mod tests {
             .expect("selection must be valid");
         assert_eq!(editor_state.selection(), selection);
     }
+
     #[test]
     fn set_selection_rejects_block_boundary_without_changing_selection() {
         let document = Document::empty().expect("empty document must be valid");
@@ -366,5 +393,159 @@ mod tests {
         assert_eq!(editor_state.document().text(), "ello");
         assert_eq!(editor_state.selection(), new_selection);
         assert_eq!(editor_state.stored_marks(), new_stored_marks.as_deref());
+    }
+
+    #[test]
+    fn insert_text_updates_document_and_moves_cursor() {
+        let document = Document::from_json(
+            r#"{
+                "type": "doc",
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ]
+            }"#,
+        )
+        .expect("document must be valid");
+
+        let mut editor_state = EditorState::new(document).expect("editor state must be valid");
+
+        let selection = TextSelection::cursor(Position::from_utf16_offset(3));
+        editor_state
+            .set_selection(selection)
+            .expect("selection must be valid");
+        editor_state
+            .insert_text("y")
+            .expect("insertion must succeed");
+
+        assert_eq!(editor_state.document().text(), "Heyllo");
+        assert_eq!(
+            editor_state.selection(),
+            TextSelection::cursor(Position::from_utf16_offset(4))
+        );
+    }
+
+    #[test]
+    fn insert_text_replaces_selection_in_either_direction() {
+        for (anchor, head) in [(1, 3), (3, 1)] {
+            let document = Document::from_json(
+                r#"{
+                "type": "doc",
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ]
+            }"#,
+            )
+            .expect("document must be valid");
+
+            let mut editor_state = EditorState::new(document).expect("editor state must be valid");
+
+            // Test inserting text that replaces a selection from left to right
+            let selection = TextSelection::new(
+                Position::from_utf16_offset(anchor),
+                Position::from_utf16_offset(head),
+            );
+            editor_state
+                .set_selection(selection)
+                .expect("selection must be valid");
+            editor_state
+                .insert_text("A")
+                .expect("insertion must succeed");
+
+            assert_eq!(editor_state.document().text(), "Allo");
+            assert_eq!(
+                editor_state.selection(),
+                TextSelection::cursor(Position::from_utf16_offset(2))
+            );
+        }
+    }
+
+    #[test]
+    fn insert_text_moves_cursor_by_utf16_length() {
+        let document = Document::from_json(
+            r#"{
+                "type": "doc",
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ]
+            }"#,
+        )
+        .expect("document must be valid");
+
+        let mut editor_state = EditorState::new(document).expect("editor state must be valid");
+
+        let selection = TextSelection::cursor(Position::from_utf16_offset(3));
+        editor_state
+            .set_selection(selection)
+            .expect("selection must be valid");
+        editor_state
+            .insert_text("𐍈")
+            .expect("insertion must succeed");
+
+        assert_eq!(editor_state.document().text(), "He𐍈llo");
+        assert_eq!(
+            editor_state.selection(),
+            TextSelection::cursor(Position::from_utf16_offset(5))
+        );
+    }
+    #[test]
+    fn insert_text_preserves_state_when_text_is_empty() {
+        let document = Document::from_json(
+            r#"{
+                "type": "doc",
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ]
+            }"#,
+        )
+        .expect("document must be valid");
+
+        let mut editor_state = EditorState::new(document).expect("editor state must be valid");
+        let selection = TextSelection::new(
+            Position::from_utf16_offset(1),
+            Position::from_utf16_offset(3),
+        );
+        editor_state
+            .set_selection(selection)
+            .expect("selection must be valid");
+        editor_state.stored_marks = Some(vec![Mark::Strong]);
+        editor_state
+            .insert_text("")
+            .expect("insertion must succeed");
+
+        assert_eq!(editor_state.document().text(), "Hello");
+        assert_eq!(editor_state.selection(), selection);
+        assert_eq!(editor_state.stored_marks(), Some(&[Mark::Strong][..]));
     }
 }
