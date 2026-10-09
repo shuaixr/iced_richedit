@@ -38,10 +38,11 @@ impl EditorState {
     pub fn stored_marks(&self) -> Option<&[Mark]> {
         self.stored_marks.as_deref()
     }
-    fn apply_transaction(
+    fn dispatch_transaction(
         &mut self,
         result: TransactionResult,
         selection: TextSelection,
+        stored_marks: Option<Vec<Mark>>,
     ) -> Result<(), EditorError> {
         let document = result.into_document();
 
@@ -51,7 +52,7 @@ impl EditorState {
 
         self.document = document;
         self.selection = selection;
-        self.stored_marks = None;
+        self.stored_marks = stored_marks;
 
         Ok(())
     }
@@ -72,7 +73,7 @@ impl EditorState {
         let result = transaction.finish();
         let selection = TextSelection::cursor(from);
 
-        self.apply_transaction(result, selection)
+        self.dispatch_transaction(result, selection, None)
     }
 }
 #[cfg(test)]
@@ -261,7 +262,7 @@ mod tests {
         );
     }
     #[test]
-    fn apply_transaction_preserves_state_when_new_selection_is_invalid() {
+    fn dispatch_transaction_preserves_state_when_new_selection_is_invalid() {
         let document = Document::from_json(
             r#"{
                 "type": "doc",
@@ -306,7 +307,7 @@ mod tests {
         );
 
         assert!(matches!(
-            editor_state.apply_transaction(result, new_selection),
+            editor_state.dispatch_transaction(result, new_selection, Some(vec![Mark::Code])),
             Err(EditorError::Document(DocumentError::InvalidPosition {
                 position: 0
             }))
@@ -315,5 +316,55 @@ mod tests {
         assert_eq!(editor_state.document().text(), "Hello");
         assert_eq!(editor_state.selection(), selection);
         assert_eq!(editor_state.stored_marks(), Some(&[Mark::Strong][..]));
+    }
+    #[test]
+    fn dispatch_transaction_installs_document_selection_and_stored_marks() {
+        let document = Document::from_json(
+            r#"{
+                "type": "doc",
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ]
+            }"#,
+        )
+        .expect("document must be valid");
+
+        let mut editor_state = EditorState::new(document).expect("editor state must be valid");
+
+        let selection = TextSelection::new(
+            Position::from_utf16_offset(1),
+            Position::from_utf16_offset(2),
+        );
+        editor_state
+            .set_selection(selection)
+            .expect("selection must be valid");
+
+        let mut transaction = editor_state.document().transaction();
+        transaction
+            .delete_range(
+                Position::from_utf16_offset(1),
+                Position::from_utf16_offset(2),
+            )
+            .expect("deletion must succeed");
+        let result = transaction.finish();
+
+        let new_selection = TextSelection::cursor(Position::from_utf16_offset(1));
+        let new_stored_marks = Some(vec![Mark::Code]);
+
+        editor_state
+            .dispatch_transaction(result, new_selection, new_stored_marks.clone())
+            .expect("dispatch must succeed");
+
+        assert_eq!(editor_state.document().text(), "ello");
+        assert_eq!(editor_state.selection(), new_selection);
+        assert_eq!(editor_state.stored_marks(), new_stored_marks.as_deref());
     }
 }
