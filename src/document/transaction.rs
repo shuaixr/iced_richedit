@@ -21,7 +21,7 @@ impl Transaction {
     }
 
     pub fn commit(self) -> Document {
-        Document::from_parts(self.schema, self.transform.doc)
+        self.finish().into_document()
     }
 
     fn validate_position(&self, position: Position) -> Result<usize, DocumentError> {
@@ -148,5 +148,19 @@ impl Transaction {
         });
 
         Ok(self)
+    }
+    pub(crate) fn finish(self) -> TransactionResult {
+        let document = Document::from_parts(self.schema, self.transform.doc);
+
+        TransactionResult { document }
+    }
+}
+pub(crate) struct TransactionResult {
+    document: Document,
+}
+
+impl TransactionResult {
+    pub(crate) fn into_document(self) -> Document {
+        self.document
     }
 }
