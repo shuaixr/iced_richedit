@@ -1,13 +1,11 @@
-use std::sync::Arc;
-
-use prosemirror::{
-    dynamic::{DynamicNode, types::Dyn},
-    model::{Node, ResolvedPos},
-};
-
 use crate::document::{
     DocumentError, Mark, Position, TextSelection, schema::DocumentSchema, transaction::Transaction,
 };
+use prosemirror::{
+    dynamic::{DynamicNode, types::Dyn},
+    model::{Mark as ProseMirrorMark, Node, NodeType, ResolvedPos},
+};
+use std::sync::Arc;
 
 pub struct Document {
     schema: Arc<DocumentSchema>,
@@ -109,6 +107,80 @@ impl Document {
                 .iter()
                 .map(|mark| self.schema.public_mark(mark))
                 .collect()
+        })
+    }
+
+    pub(crate) fn normalize_marks(&self, marks: &[Mark]) -> Result<Vec<Mark>, DocumentError> {
+        self.schema.scope(|| {
+            let set = self.schema.mark_set(marks)?;
+
+            set.iter()
+                .map(|mark| self.schema.public_mark(mark))
+                .collect()
+        })
+    }
+
+    pub(crate) fn range_has_mark(
+        &self,
+        selection: TextSelection,
+        mark: &Mark,
+    ) -> Result<bool, DocumentError> {
+        self.validate_selection(selection)?;
+
+        if selection.is_empty() {
+            return Ok(false);
+        }
+
+        self.schema.scope(|| {
+            let dynamic_mark = self.schema.mark(mark)?;
+            let mark_type = dynamic_mark.r#type();
+
+            let from = selection.from().utf16_offset();
+            let to = selection.to().utf16_offset();
+
+            let mut found_inline = false;
+            let mut all_marked = true;
+
+            self.node.nodes_between(
+                from,
+                to,
+                &mut |node, position, parent, _index| {
+                    if !all_marked {
+                        return false;
+                    }
+
+                    if !node.is_inline() {
+                        return true;
+                    }
+
+                    // Only inspect inline nodes that overlap the selected range.
+                    if position >= to || position + node.node_size() <= from {
+                        return false;
+                    }
+
+                    let Some(parent) = parent else {
+                        return false;
+                    };
+
+                    if !parent.r#type().allows_mark_type(mark_type) {
+                        return false;
+                    }
+
+                    found_inline = true;
+
+                    if !node
+                        .marks()
+                        .is_some_and(|marks| marks.contains(&dynamic_mark))
+                    {
+                        all_marked = false;
+                    }
+
+                    false
+                },
+                0,
+            );
+
+            Ok(found_inline && all_marked)
         })
     }
 }

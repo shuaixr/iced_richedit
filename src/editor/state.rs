@@ -108,6 +108,52 @@ impl EditorState {
 
         self.dispatch_transaction(transaction.finish(), selection, stored_marks)
     }
+    pub fn toggle_mark(&mut self, mark: Mark) -> Result<(), EditorError> {
+        if !self.selection.is_empty() {
+            let selection = self.selection;
+
+            let remove = self
+                .document
+                .range_has_mark(selection, &mark)
+                .map_err(EditorError::Document)?;
+
+            let mut transaction = self.document.transaction();
+
+            if remove {
+                transaction
+                    .remove_mark(selection.from(), selection.to(), mark)
+                    .map_err(EditorError::Document)?;
+            } else {
+                transaction
+                    .add_mark(selection.from(), selection.to(), mark)
+                    .map_err(EditorError::Document)?;
+            }
+
+            return self.dispatch_transaction(transaction.finish(), selection, None);
+        }
+        let mut marks = match &self.stored_marks {
+            Some(marks) => marks.clone(),
+            None => self
+                .document
+                .marks_at(self.selection.head())
+                .map_err(EditorError::Document)?,
+        };
+
+        if marks.contains(&mark) {
+            marks.retain(|existing| existing != &mark);
+        } else {
+            marks.push(mark);
+        }
+
+        let marks = self
+            .document
+            .normalize_marks(&marks)
+            .map_err(EditorError::Document)?;
+
+        self.stored_marks = Some(marks);
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -758,5 +804,212 @@ mod tests {
             TextSelection::cursor(Position::from_utf16_offset(4))
         );
         assert_eq!(editor_state.stored_marks(), Some(&[Mark::Strong][..]));
+    }
+
+    #[test]
+    fn toggle_mark_at_cursor_preserves_document_and_toggles_stored_marks() {
+        let document = Document::empty().expect("document must be valid");
+        let mut state = EditorState::new(document).expect("editor state must be valid");
+
+        let original_json = state.document().to_json().expect("document must serialize");
+        let original_selection = state.selection();
+
+        state
+            .toggle_mark(Mark::Strong)
+            .expect("mark toggle must succeed");
+
+        assert_eq!(state.stored_marks(), Some(&[Mark::Strong][..]));
+
+        state
+            .toggle_mark(Mark::Strong)
+            .expect("mark toggle must succeed");
+
+        assert_eq!(state.stored_marks(), Some(&[][..]));
+        assert_eq!(state.selection(), original_selection);
+        assert_eq!(
+            state.document().to_json().expect("document must serialize"),
+            original_json
+        );
+    }
+
+    #[test]
+    fn toggle_mark_adds_strong_to_range_and_preserves_direction() {
+        let document = Document::from_json(
+            r#"{
+                "type": "doc",
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Hello"
+                            }
+                        ]
+                    }
+                ]
+            }"#,
+        )
+        .expect("document must be valid");
+
+        let mut state = EditorState::new(document).expect("editor state must be valid");
+
+        let selection = TextSelection::new(
+            Position::from_utf16_offset(5),
+            Position::from_utf16_offset(2),
+        );
+        state
+            .set_selection(selection)
+            .expect("selection must be valid");
+        state
+            .toggle_mark(Mark::Strong)
+            .expect("mark toggle must succeed");
+
+        let actual: serde_json::Value =
+            serde_json::from_str(&state.document().to_json().expect("document must serialize"))
+                .expect("output must be valid JSON");
+
+        assert_eq!(
+            actual,
+            serde_json::json!({
+                "type": "doc",
+                "content": [{
+                    "type": "paragraph",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "H"
+                        },
+                        {
+                            "type": "text",
+                            "text": "ell",
+                            "marks": [{ "type": "strong" }]
+                        },
+                        {
+                            "type": "text",
+                            "text": "o"
+                        }
+                    ]
+                }]
+            })
+        );
+
+        assert_eq!(state.selection(), selection);
+        assert!(state.stored_marks().is_none());
+    }
+
+    #[test]
+    fn toggle_mark_removes_strong_when_entire_range_is_marked() {
+        let document = Document::from_json(
+            r#"{
+           "type": "doc",
+           "content": [
+               {
+                   "type": "paragraph",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Hello",
+                            "marks": [{ "type": "strong" }]
+                        }
+                ]
+               }
+           ]
+       }"#,
+        )
+        .expect("document must be valid");
+
+        let mut state = EditorState::new(document).expect("editor state must be valid");
+
+        let selection = TextSelection::new(
+            Position::from_utf16_offset(1),
+            Position::from_utf16_offset(6),
+        );
+        state
+            .set_selection(selection)
+            .expect("selection must be valid");
+        state
+            .toggle_mark(Mark::Strong)
+            .expect("mark toggle must succeed");
+
+        let actual: serde_json::Value =
+            serde_json::from_str(&state.document().to_json().expect("document must serialize"))
+                .expect("output must be valid JSON");
+
+        assert_eq!(
+            actual,
+            serde_json::json!({
+                "type": "doc",
+                "content": [{
+                    "type": "paragraph",
+                    "content": [{
+                        "type": "text",
+                        "text": "Hello"
+                    }]
+                }]
+            })
+        );
+
+        assert_eq!(state.selection(), selection);
+        assert!(state.stored_marks().is_none());
+    }
+
+    #[test]
+    fn toggle_mark_adds_strong_when_range_is_partially_marked() {
+        let document = Document::from_json(
+            r#"{
+                "type": "doc",
+                "content": [{
+                "type": "paragraph",
+                "content": [
+                    {
+                    "type": "text",
+                    "text": "He",
+                    "marks": [{ "type": "strong" }]
+                    },
+                    {
+                    "type": "text",
+                    "text": "llo"
+                    }
+                ]
+                }]
+            }"#,
+        )
+        .expect("document must be valid");
+
+        let mut state = EditorState::new(document).expect("editor state must be valid");
+
+        let selection = TextSelection::new(
+            Position::from_utf16_offset(6),
+            Position::from_utf16_offset(1),
+        );
+        state
+            .set_selection(selection)
+            .expect("selection must be valid");
+        state
+            .toggle_mark(Mark::Strong)
+            .expect("mark toggle must succeed");
+
+        let actual: serde_json::Value =
+            serde_json::from_str(&state.document().to_json().expect("document must serialize"))
+                .expect("output must be valid JSON");
+
+        assert_eq!(
+            actual,
+            serde_json::json!({
+                "type": "doc",
+                "content": [{
+                    "type": "paragraph",
+                    "content": [{
+                        "type": "text",
+                        "text": "Hello",
+                        "marks": [{ "type": "strong" }]
+                    }]
+                }]
+            })
+        );
+
+        assert_eq!(state.selection(), selection);
+        assert!(state.stored_marks().is_none());
     }
 }

@@ -4,10 +4,13 @@ use crate::document::DocumentError;
 pub enum EditorError {
     Document(DocumentError),
 }
+
 impl std::fmt::Display for EditorError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Document(error) => write!(f, "editor document error: {error}"),
+            Self::Document(error) => {
+                write!(f, "editor document error: {error}")
+            }
         }
     }
 }
