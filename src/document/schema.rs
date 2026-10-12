@@ -1,7 +1,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 
 use prosemirror::{
-    dynamic::{DynamicMark, DynamicNode, DynamicSchema, types::Dyn},
+    dynamic::{DynamicMark, DynamicMarkType, DynamicNode, DynamicSchema, types::Dyn},
     model::{MarkSet, Node},
 };
 
@@ -72,6 +72,14 @@ impl DocumentSchema {
             }
 
             Ok(set)
+        })
+    }
+
+    pub(crate) fn link_type(&self) -> Result<DynamicMarkType, DocumentError> {
+        self.scope(|| {
+            self.inner.mark_type("link").ok_or_else(|| {
+                DocumentError::InvalidSchema("schema must define the link mark".to_owned())
+            })
         })
     }
 

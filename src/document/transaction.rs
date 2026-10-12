@@ -163,6 +163,34 @@ impl Transaction {
 
         TransactionResult { document }
     }
+
+    pub(crate) fn remove_link(
+        &mut self,
+        from: Position,
+        to: Position,
+    ) -> Result<&mut Self, DocumentError> {
+        let from = self.validate_position(from)?;
+        let to = self.validate_position(to)?;
+
+        if from > to {
+            return Err(DocumentError::TransformFailed(format!(
+                "range start {from} is after range end {to}"
+            )));
+        }
+
+        if from == to {
+            return Ok(self);
+        }
+
+        let link_type = self.schema.link_type()?;
+
+        self.schema.scope(|| {
+            self.transform
+                .remove_mark(from, to, Some(MarkOrType::MarkType(link_type)));
+        });
+
+        Ok(self)
+    }
 }
 pub(crate) struct TransactionResult {
     document: Document,

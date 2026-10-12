@@ -154,6 +154,70 @@ impl EditorState {
 
         Ok(())
     }
+
+    pub fn set_link(&mut self, href: String, title: Option<String>) -> Result<(), EditorError> {
+        let mark = Mark::Link { href, title };
+
+        if self.selection.is_empty() {
+            let mut marks = match &self.stored_marks {
+                Some(marks) => marks.clone(),
+                None => self
+                    .document
+                    .marks_at(self.selection.head())
+                    .map_err(EditorError::Document)?,
+            };
+
+            marks.push(mark);
+
+            let marks = self
+                .document
+                .normalize_marks(&marks)
+                .map_err(EditorError::Document)?;
+
+            self.stored_marks = Some(marks);
+            return Ok(());
+        }
+
+        let selection = self.selection;
+        let mut transaction = self.document.transaction();
+
+        transaction
+            .add_mark(selection.from(), selection.to(), mark)
+            .map_err(EditorError::Document)?;
+
+        self.dispatch_transaction(transaction.finish(), selection, None)
+    }
+
+    pub fn remove_link(&mut self) -> Result<(), EditorError> {
+        if self.selection.is_empty() {
+            let mut marks = match &self.stored_marks {
+                Some(marks) => marks.clone(),
+                None => self
+                    .document
+                    .marks_at(self.selection.head())
+                    .map_err(EditorError::Document)?,
+            };
+
+            marks.retain(|mark| !matches!(mark, Mark::Link { .. }));
+
+            let marks = self
+                .document
+                .normalize_marks(&marks)
+                .map_err(EditorError::Document)?;
+
+            self.stored_marks = Some(marks);
+            return Ok(());
+        }
+
+        let selection = self.selection;
+        let mut transaction = self.document.transaction();
+
+        transaction
+            .remove_link(selection.from(), selection.to())
+            .map_err(EditorError::Document)?;
+
+        self.dispatch_transaction(transaction.finish(), selection, None)
+    }
 }
 
 #[cfg(test)]
@@ -1009,6 +1073,154 @@ mod tests {
             })
         );
 
+        assert_eq!(state.selection(), selection);
+        assert!(state.stored_marks().is_none());
+    }
+
+    #[test]
+    fn set_link_replaces_existing_link_in_selection() {
+        let document = Document::from_json(
+            r#"{
+                "type": "doc",
+                "content": [{
+                    "type": "paragraph",
+                    "content": [{
+                        "type": "text",
+                        "text": "Hello",
+                        "marks": [
+                            { "type": "strong" },
+                            {
+                                "type": "link",
+                                "attrs": {
+                                    "href": "https://example.com",
+                                    "title": null
+                                }
+                            }
+                        ]
+                    }]
+                }]
+            }"#,
+        )
+        .expect("document must be valid");
+
+        let mut state = EditorState::new(document).expect("editor state must be valid");
+
+        let selection = TextSelection::new(
+            Position::from_utf16_offset(6),
+            Position::from_utf16_offset(1),
+        );
+        state
+            .set_selection(selection)
+            .expect("selection must be valid");
+        state
+            .set_link("https://new-link.com".to_owned(), None)
+            .expect("link must be set");
+
+        let actual: serde_json::Value =
+            serde_json::from_str(&state.document().to_json().expect("document must serialize"))
+                .expect("output must be valid JSON");
+
+        assert_eq!(
+            actual,
+            serde_json::json!({
+                "type": "doc",
+                "content": [{
+                    "type": "paragraph",
+                    "content": [{
+                        "type": "text",
+                        "text": "Hello",
+                        "marks": [
+                            { "type": "strong" },
+                            {
+                                "type": "link",
+                                "attrs": {
+                                    "href": "https://new-link.com",
+                                    "title": null
+                                }
+                            }
+                        ]
+                    }]
+                }]
+            })
+        );
+        assert_eq!(state.selection(), selection);
+        assert!(state.stored_marks().is_none());
+    }
+
+    #[test]
+    fn remove_link_removes_links_with_different_attrs() {
+        let document = Document::from_json(
+            r#"{
+                "type": "doc",
+                "content": [{
+                    "type": "paragraph",
+                   "content": [
+                        {
+                            "type": "text",
+                            "text": "He",
+                            "marks": [
+                                { "type": "strong" },
+                                {
+                                    "type": "link",
+                                    "attrs": {
+                                        "href": "https://a.example",
+                                        "title": null
+                                    }
+                                }
+                            ]
+                        },
+                        {
+                            "type": "text",
+                            "text": "llo",
+                            "marks": [{
+                                "type": "link",
+                                "attrs": {
+                                    "href": "https://b.example",
+                                    "title": "Second"
+                                }
+                            }]
+                        }
+                    ]
+                }]
+            }"#,
+        )
+        .expect("document must be valid");
+
+        let mut state = EditorState::new(document).expect("editor state must be valid");
+
+        let selection = TextSelection::new(
+            Position::from_utf16_offset(6),
+            Position::from_utf16_offset(1),
+        );
+        state
+            .set_selection(selection)
+            .expect("selection must be valid");
+        state.remove_link().expect("link must be removed");
+
+        let actual: serde_json::Value =
+            serde_json::from_str(&state.document().to_json().expect("document must serialize"))
+                .expect("output must be valid JSON");
+
+        assert_eq!(
+            actual,
+            serde_json::json!({
+                "type": "doc",
+                "content": [{
+                    "type": "paragraph",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "He",
+                            "marks": [{ "type": "strong" }]
+                        },
+                        {
+                            "type": "text",
+                            "text": "llo"
+                        }
+                    ]
+                }]
+            })
+        );
         assert_eq!(state.selection(), selection);
         assert!(state.stored_marks().is_none());
     }
