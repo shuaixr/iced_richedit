@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
+use prosemirror::transform::Step;
+use prosemirror::transform::transform::StepError as TransformStepError;
 use prosemirror::{
     dynamic::{DynamicNode, types::Dyn},
-    model::{Fragment, ResolvedPos},
+    model::{Fragment, Node, ResolvedPos},
     transform::{MarkOrType, Transform},
 };
 
@@ -158,10 +160,31 @@ impl Transaction {
 
         Ok(self)
     }
+
     pub(crate) fn finish(self) -> TransactionResult {
+        let change = if self.transform.steps.is_empty() {
+            None
+        } else {
+            let inverse = self.schema.scope(|| {
+                self.transform
+                    .steps
+                    .iter()
+                    .zip(self.transform.docs.iter())
+                    .rev()
+                    .map(|(step, document_before_step)| step.invert(document_before_step))
+                    .collect()
+            });
+
+            Some(DocumentChange {
+                schema: Arc::clone(&self.schema),
+                forward: self.transform.steps,
+                inverse,
+            })
+        };
+
         let document = Document::from_parts(self.schema, self.transform.doc);
 
-        TransactionResult { document }
+        TransactionResult { document, change }
     }
 
     pub(crate) fn remove_link(
@@ -191,13 +214,91 @@ impl Transaction {
 
         Ok(self)
     }
+
+    pub(crate) fn split_paragraph(
+        &mut self,
+        position: Position,
+    ) -> Result<&mut Self, DocumentError> {
+        let offset = self.validate_position(position)?;
+
+        self.schema.scope(|| {
+            let resolved = ResolvedPos::<Dyn>::resolve(&self.transform.doc, offset)
+                .map_err(|_| DocumentError::InvalidPosition { position: offset })?;
+
+            if !resolved.parent().is_textblock() {
+                return Err(DocumentError::InvalidPosition { position: offset });
+            }
+
+            self.transform
+                .split(offset, Some(1), None)
+                .map_err(|error| match error {
+                    TransformStepError::ApplyFailed(message) => {
+                        DocumentError::TransformFailed(message)
+                    }
+                })?;
+
+            Ok(())
+        })?;
+
+        Ok(self)
+    }
+
+    fn apply_steps(&mut self, steps: &[Step<Dyn>]) -> Result<(), DocumentError> {
+        self.schema.scope(|| {
+            for step in steps {
+                self.transform
+                    .step(step.clone())
+                    .map_err(|error| match error {
+                        TransformStepError::ApplyFailed(message) => {
+                            DocumentError::TransformFailed(message)
+                        }
+                    })?;
+            }
+
+            Ok(())
+        })
+    }
 }
 pub(crate) struct TransactionResult {
     document: Document,
+    change: Option<DocumentChange>,
 }
 
 impl TransactionResult {
     pub(crate) fn into_document(self) -> Document {
         self.document
+    }
+    pub(crate) fn into_parts(self) -> (Document, Option<DocumentChange>) {
+        (self.document, self.change)
+    }
+}
+
+pub(crate) struct DocumentChange {
+    schema: Arc<DocumentSchema>,
+    forward: Vec<Step<Dyn>>,
+    inverse: Vec<Step<Dyn>>,
+}
+impl DocumentChange {
+    fn apply_steps(
+        &self,
+        document: &Document,
+        steps: &[Step<Dyn>],
+    ) -> Result<Document, DocumentError> {
+        let mut transaction = document.transaction();
+        if !Arc::ptr_eq(&self.schema, &transaction.schema) {
+            return Err(DocumentError::TransformFailed(
+                "change belongs to a different document schema".to_owned(),
+            ));
+        }
+        transaction.apply_steps(steps)?;
+
+        Ok(transaction.commit())
+    }
+    pub(crate) fn apply_forward(&self, document: &Document) -> Result<Document, DocumentError> {
+        self.apply_steps(document, &self.forward)
+    }
+
+    pub(crate) fn apply_inverse(&self, document: &Document) -> Result<Document, DocumentError> {
+        self.apply_steps(document, &self.inverse)
     }
 }

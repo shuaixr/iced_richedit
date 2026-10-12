@@ -13,4 +13,4 @@ pub use position::Position;
 pub use selection::TextSelection;
 pub use transaction::Transaction;
 
-pub(crate) use transaction::TransactionResult;
+pub(crate) use transaction::{DocumentChange, TransactionResult};

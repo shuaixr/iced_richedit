@@ -1,12 +1,16 @@
 use crate::{
     document::{Document, Mark, Position, TextSelection, TransactionResult},
-    editor::error::EditorError,
+    editor::{
+        error::EditorError,
+        history::{History, HistoryEntry},
+    },
 };
 
 pub struct EditorState {
     document: Document,
     selection: TextSelection,
     stored_marks: Option<Vec<Mark>>,
+    history: History,
 }
 impl EditorState {
     pub fn new(document: Document) -> Result<Self, EditorError> {
@@ -18,6 +22,7 @@ impl EditorState {
             document,
             selection,
             stored_marks: None,
+            history: History::default(),
         })
     }
     pub fn document(&self) -> &Document {
@@ -44,11 +49,20 @@ impl EditorState {
         selection: TextSelection,
         stored_marks: Option<Vec<Mark>>,
     ) -> Result<(), EditorError> {
-        let document = result.into_document();
+        let (document, change) = result.into_parts();
 
         document
             .validate_selection(selection)
             .map_err(EditorError::Document)?;
+        if let Some(change) = change {
+            self.history.record(HistoryEntry {
+                change,
+                selection_before: self.selection,
+                selection_after: selection,
+                stored_marks_before: self.stored_marks.clone(),
+                stored_marks_after: stored_marks.clone(),
+            });
+        }
 
         self.document = document;
         self.selection = selection;
@@ -108,6 +122,7 @@ impl EditorState {
 
         self.dispatch_transaction(transaction.finish(), selection, stored_marks)
     }
+
     pub fn toggle_mark(&mut self, mark: Mark) -> Result<(), EditorError> {
         if !self.selection.is_empty() {
             let selection = self.selection;
@@ -217,6 +232,89 @@ impl EditorState {
             .map_err(EditorError::Document)?;
 
         self.dispatch_transaction(transaction.finish(), selection, None)
+    }
+
+    pub fn split_paragraph(&mut self) -> Result<(), EditorError> {
+        let from = self.selection.from();
+        let to = self.selection.to();
+
+        let mut transaction = self.document.transaction();
+
+        if !self.selection.is_empty() {
+            transaction
+                .delete_range(from, to)
+                .map_err(EditorError::Document)?;
+        }
+
+        transaction
+            .split_paragraph(from)
+            .map_err(EditorError::Document)?;
+
+        let selection = TextSelection::cursor(Position::from_utf16_offset(from.utf16_offset() + 2));
+
+        self.dispatch_transaction(transaction.finish(), selection, None)
+    }
+
+    pub fn undo(&mut self) -> Result<(), EditorError> {
+        let Some(entry) = self.history.undo_entry() else {
+            return Ok(());
+        };
+
+        let document = entry
+            .change
+            .apply_inverse(&self.document)
+            .map_err(EditorError::Document)?;
+
+        let selection = entry.selection_before;
+
+        document
+            .validate_selection(selection)
+            .map_err(EditorError::Document)?;
+
+        let stored_marks = entry.stored_marks_before.clone();
+
+        self.history.complete_undo();
+
+        self.document = document;
+        self.selection = selection;
+        self.stored_marks = stored_marks;
+
+        Ok(())
+    }
+
+    pub fn redo(&mut self) -> Result<(), EditorError> {
+        let Some(entry) = self.history.redo_entry() else {
+            return Ok(());
+        };
+
+        let document = entry
+            .change
+            .apply_forward(&self.document)
+            .map_err(EditorError::Document)?;
+
+        let selection = entry.selection_after;
+
+        document
+            .validate_selection(selection)
+            .map_err(EditorError::Document)?;
+
+        let stored_marks = entry.stored_marks_after.clone();
+
+        self.history.complete_redo();
+
+        self.document = document;
+        self.selection = selection;
+        self.stored_marks = stored_marks;
+
+        Ok(())
+    }
+
+    pub fn can_undo(&self) -> bool {
+        self.history.undo_entry().is_some()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        self.history.redo_entry().is_some()
     }
 }
 
