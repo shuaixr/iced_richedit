@@ -657,6 +657,7 @@ dependencies = [
  "iced",
  "prosemirror",
  "serde_json",
+ "unicode-segmentation",
 ]
 
 [[package]]

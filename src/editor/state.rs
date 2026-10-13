@@ -316,6 +316,44 @@ impl EditorState {
     pub fn can_redo(&self) -> bool {
         self.history.redo_entry().is_some()
     }
+
+    pub fn move_left(&mut self) -> Result<(), EditorError> {
+        if !self.selection.is_empty() {
+            return self.set_selection(TextSelection::cursor(self.selection.from()));
+        }
+
+        let position = self.selection.head();
+
+        let previous = self
+            .document
+            .previous_cursor_position(position)
+            .map_err(EditorError::Document)?;
+
+        let Some(previous) = previous else {
+            return Ok(());
+        };
+
+        self.set_selection(TextSelection::cursor(previous))
+    }
+
+    pub fn move_right(&mut self) -> Result<(), EditorError> {
+        if !self.selection.is_empty() {
+            return self.set_selection(TextSelection::cursor(self.selection.to()));
+        }
+
+        let position = self.selection.head();
+
+        let next = self
+            .document
+            .next_cursor_position(position)
+            .map_err(EditorError::Document)?;
+
+        let Some(next) = next else {
+            return Ok(());
+        };
+
+        self.set_selection(TextSelection::cursor(next))
+    }
 }
 
 #[cfg(test)]

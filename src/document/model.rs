@@ -6,6 +6,7 @@ use prosemirror::{
     model::{Mark as ProseMirrorMark, Node, NodeType, ResolvedPos},
 };
 use std::sync::Arc;
+use unicode_segmentation::UnicodeSegmentation;
 
 pub struct Document {
     schema: Arc<DocumentSchema>,
@@ -181,6 +182,94 @@ impl Document {
             );
 
             Ok(found_inline && all_marked)
+        })
+    }
+
+    pub(crate) fn previous_cursor_position(
+        &self,
+        position: Position,
+    ) -> Result<Option<Position>, DocumentError> {
+        self.adjacent_cursor_position(position, false)
+    }
+
+    pub(crate) fn next_cursor_position(
+        &self,
+        position: Position,
+    ) -> Result<Option<Position>, DocumentError> {
+        self.adjacent_cursor_position(position, true)
+    }
+
+    fn adjacent_cursor_position(
+        &self,
+        position: Position,
+        forward: bool,
+    ) -> Result<Option<Position>, DocumentError> {
+        self.validate_selection(TextSelection::cursor(position))?;
+
+        let current = position.utf16_offset();
+
+        self.schema.scope(|| {
+            let mut adjacent: Option<usize> = None;
+
+            let mut consider = |candidate: usize| {
+                if forward {
+                    if candidate > current && adjacent.is_none_or(|previous| candidate < previous) {
+                        adjacent = Some(candidate);
+                    }
+                } else if candidate < current
+                    && adjacent.is_none_or(|previous| candidate > previous)
+                {
+                    adjacent = Some(candidate);
+                }
+            };
+
+            let mut block_start = 0;
+
+            for block_index in 0..self.node.child_count() {
+                let block = self.node.maybe_child(block_index).ok_or_else(|| {
+                    DocumentError::InvalidDocument("document block is missing".to_owned())
+                })?;
+
+                if !block.is_textblock() {
+                    return Err(DocumentError::InvalidDocument(
+                        "cursor navigation requires top-level text blocks".to_owned(),
+                    ));
+                }
+
+                let mut text = String::new();
+
+                for inline_index in 0..block.child_count() {
+                    let inline = block.maybe_child(inline_index).ok_or_else(|| {
+                        DocumentError::InvalidDocument("text block child is missing".to_owned())
+                    })?;
+
+                    if inline.is_text() {
+                        text.push_str(&inline.text_content());
+                    } else if inline.is_leaf() && inline.is_inline() && inline.node_size() == 1 {
+                        // The current schema's only inline leaf is hard_break.
+                        text.push('\n');
+                    } else {
+                        return Err(DocumentError::InvalidDocument(
+                            "cursor navigation encountered unsupported inline content".to_owned(),
+                        ));
+                    }
+                }
+
+                let content_start = block_start + 1;
+                let mut utf16_offset = 0;
+
+                // An empty paragraph still has one valid cursor position.
+                consider(content_start);
+
+                for grapheme in text.graphemes(true) {
+                    utf16_offset += grapheme.encode_utf16().count();
+                    consider(content_start + utf16_offset);
+                }
+
+                block_start += block.node_size();
+            }
+
+            Ok(adjacent.map(Position::from_utf16_offset))
         })
     }
 }
