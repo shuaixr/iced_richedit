@@ -74,6 +74,7 @@ impl Document {
             Ok(TextSelection::cursor(Position::from_utf16_offset(1)))
         })
     }
+
     pub(crate) fn validate_selection(&self, selection: TextSelection) -> Result<(), DocumentError> {
         self.schema.scope(|| {
             for position in [selection.anchor(), selection.head()] {
@@ -85,12 +86,36 @@ impl Document {
                 if !resolved.parent().inline_content() {
                     return Err(DocumentError::InvalidPosition { position: offset });
                 }
+
+                let content_start = resolved.start(resolved.depth);
+                let local_offset = offset - content_start;
+
+                let text = Self::navigation_text(resolved.parent())?;
+
+                let mut boundary = 0;
+                let mut valid = local_offset == 0;
+
+                for grapheme in text.graphemes(true) {
+                    boundary += grapheme.encode_utf16().count();
+
+                    if boundary == local_offset {
+                        valid = true;
+                        break;
+                    }
+
+                    if boundary > local_offset {
+                        break;
+                    }
+                }
+
+                if !valid {
+                    return Err(DocumentError::InvalidPosition { position: offset });
+                }
             }
 
             Ok(())
         })
     }
-
     pub(crate) fn marks_at(&self, position: Position) -> Result<Vec<Mark>, DocumentError> {
         self.schema.scope(|| {
             let offset = position.utf16_offset();
@@ -236,24 +261,7 @@ impl Document {
                     ));
                 }
 
-                let mut text = String::new();
-
-                for inline_index in 0..block.child_count() {
-                    let inline = block.maybe_child(inline_index).ok_or_else(|| {
-                        DocumentError::InvalidDocument("text block child is missing".to_owned())
-                    })?;
-
-                    if inline.is_text() {
-                        text.push_str(&inline.text_content());
-                    } else if inline.is_leaf() && inline.is_inline() && inline.node_size() == 1 {
-                        // The current schema's only inline leaf is hard_break.
-                        text.push('\n');
-                    } else {
-                        return Err(DocumentError::InvalidDocument(
-                            "cursor navigation encountered unsupported inline content".to_owned(),
-                        ));
-                    }
-                }
+                let text = Self::navigation_text(block)?;
 
                 let content_start = block_start + 1;
                 let mut utf16_offset = 0;
@@ -270,6 +278,94 @@ impl Document {
             }
 
             Ok(adjacent.map(Position::from_utf16_offset))
+        })
+    }
+
+    pub(crate) fn cursor_at_paragraph_boundary(
+        &self,
+        position: Position,
+        forward: bool,
+    ) -> Result<bool, DocumentError> {
+        self.validate_selection(TextSelection::cursor(position))?;
+
+        let offset = position.utf16_offset();
+
+        self.schema.scope(|| {
+            let resolved = ResolvedPos::<Dyn>::resolve(&self.node, offset)
+                .map_err(|_| DocumentError::InvalidPosition { position: offset })?;
+
+            if resolved.depth != 1 || !resolved.parent().is_textblock() {
+                return Err(DocumentError::InvalidDocument(
+                    "paragraph deletion requires a top-level text block".to_owned(),
+                ));
+            }
+
+            let boundary = if forward {
+                resolved.end(resolved.depth)
+            } else {
+                resolved.start(resolved.depth)
+            };
+
+            Ok(offset == boundary)
+        })
+    }
+
+    fn navigation_text(block: &DynamicNode) -> Result<String, DocumentError> {
+        let mut text = String::new();
+
+        for index in 0..block.child_count() {
+            let inline = block.maybe_child(index).ok_or_else(|| {
+                DocumentError::InvalidDocument("text block child is missing".to_owned())
+            })?;
+
+            if inline.is_text() {
+                text.push_str(&inline.text_content());
+            } else if inline.is_leaf() && inline.is_inline() && inline.node_size() == 1 {
+                // The current schema's only inline leaf is hard_break.
+                text.push('\n');
+            } else {
+                return Err(DocumentError::InvalidDocument(
+                    "cursor navigation encountered unsupported inline content".to_owned(),
+                ));
+            }
+        }
+
+        Ok(text)
+    }
+
+    pub(crate) fn snap_cursor_forward(
+        &self,
+        position: Position,
+    ) -> Result<Position, DocumentError> {
+        let offset = position.utf16_offset();
+
+        self.schema.scope(|| {
+            let resolved = ResolvedPos::<Dyn>::resolve(&self.node, offset)
+                .map_err(|_| DocumentError::InvalidPosition { position: offset })?;
+
+            if !resolved.parent().inline_content() {
+                return Err(DocumentError::InvalidPosition { position: offset });
+            }
+
+            let content_start = resolved.start(resolved.depth);
+            let local_offset = offset - content_start;
+
+            if local_offset == 0 {
+                return Ok(position);
+            }
+
+            let text = Self::navigation_text(resolved.parent())?;
+            let mut boundary = 0;
+
+            for grapheme in text.graphemes(true) {
+                boundary += grapheme.encode_utf16().count();
+
+                if boundary >= local_offset {
+                    return Ok(Position::from_utf16_offset(content_start + boundary));
+                }
+            }
+
+            Err(DocumentError::InvalidPosition { position: offset })
         })
     }
 }
@@ -427,5 +523,46 @@ mod tests {
                 title: None
             }]
         );
+    }
+
+    #[test]
+    fn validate_selection_rejects_positions_inside_graphemes() {
+        for text in ["😀", "e\u{301}"] {
+            let json = serde_json::json!({
+                "type": "doc",
+                "content": [{
+                    "type": "paragraph",
+                    "content": [{
+                        "type": "text",
+                        "text": text
+                    }]
+                }]
+            });
+
+            let document = Document::from_json(&json.to_string()).expect("document must be valid");
+
+            let start = super::Position::from_utf16_offset(1);
+            let inside = super::Position::from_utf16_offset(2);
+            let end = super::Position::from_utf16_offset(3);
+
+            document
+                .validate_selection(super::TextSelection::cursor(start))
+                .expect("grapheme start must be valid");
+
+            document
+                .validate_selection(super::TextSelection::cursor(end))
+                .expect("grapheme end must be valid");
+
+            for selection in [
+                super::TextSelection::cursor(inside),
+                super::TextSelection::new(start, inside),
+                super::TextSelection::new(inside, end),
+            ] {
+                assert!(matches!(
+                    document.validate_selection(selection),
+                    Err(DocumentError::InvalidPosition { position: 2 })
+                ));
+            }
+        }
     }
 }

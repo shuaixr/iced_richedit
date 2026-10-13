@@ -88,7 +88,7 @@ impl EditorState {
         let result = transaction.finish();
         let selection = TextSelection::cursor(from);
 
-        self.dispatch_transaction(result, selection, None)
+        self.dispatch_cursor_edit(result, selection.head(), None)
     }
 
     pub fn insert_text(&mut self, text: &str) -> Result<(), EditorError> {
@@ -120,7 +120,7 @@ impl EditorState {
         let new_offset = from.utf16_offset() + text.encode_utf16().count();
         let selection = TextSelection::cursor(Position::from_utf16_offset(new_offset));
 
-        self.dispatch_transaction(transaction.finish(), selection, stored_marks)
+        self.dispatch_cursor_edit(transaction.finish(), selection.head(), stored_marks)
     }
 
     pub fn toggle_mark(&mut self, mark: Mark) -> Result<(), EditorError> {
@@ -252,7 +252,7 @@ impl EditorState {
 
         let selection = TextSelection::cursor(Position::from_utf16_offset(from.utf16_offset() + 2));
 
-        self.dispatch_transaction(transaction.finish(), selection, None)
+        self.dispatch_cursor_edit(transaction.finish(), selection.head(), None)
     }
 
     pub fn undo(&mut self) -> Result<(), EditorError> {
@@ -353,6 +353,82 @@ impl EditorState {
         };
 
         self.set_selection(TextSelection::cursor(next))
+    }
+
+    pub fn delete_backward(&mut self) -> Result<(), EditorError> {
+        self.delete_adjacent(false)
+    }
+
+    pub fn delete_forward(&mut self) -> Result<(), EditorError> {
+        self.delete_adjacent(true)
+    }
+
+    fn delete_adjacent(&mut self, forward: bool) -> Result<(), EditorError> {
+        if !self.selection.is_empty() {
+            return self.delete_selection();
+        }
+
+        let current = self.selection.head();
+
+        let adjacent = if forward {
+            self.document.next_cursor_position(current)
+        } else {
+            self.document.previous_cursor_position(current)
+        }
+        .map_err(EditorError::Document)?;
+
+        let Some(adjacent) = adjacent else {
+            return Ok(());
+        };
+
+        let at_boundary = self
+            .document
+            .cursor_at_paragraph_boundary(current, forward)
+            .map_err(EditorError::Document)?;
+
+        let mut transaction = self.document.transaction();
+
+        let cursor = if at_boundary {
+            let join_offset = if forward {
+                current.utf16_offset() + 1
+            } else {
+                current.utf16_offset() - 1
+            };
+
+            transaction
+                .join_paragraphs(Position::from_utf16_offset(join_offset))
+                .map_err(EditorError::Document)?;
+
+            if forward { current } else { adjacent }
+        } else {
+            let (from, to) = if forward {
+                (current, adjacent)
+            } else {
+                (adjacent, current)
+            };
+
+            transaction
+                .delete_range(from, to)
+                .map_err(EditorError::Document)?;
+
+            from
+        };
+
+        self.dispatch_cursor_edit(transaction.finish(), cursor, None)
+    }
+
+    fn dispatch_cursor_edit(
+        &mut self,
+        result: TransactionResult,
+        cursor: Position,
+        stored_marks: Option<Vec<Mark>>,
+    ) -> Result<(), EditorError> {
+        let cursor = result
+            .document()
+            .snap_cursor_forward(cursor)
+            .map_err(EditorError::Document)?;
+
+        self.dispatch_transaction(result, TextSelection::cursor(cursor), stored_marks)
     }
 }
 
@@ -1359,5 +1435,50 @@ mod tests {
         );
         assert_eq!(state.selection(), selection);
         assert!(state.stored_marks().is_none());
+    }
+
+    #[test]
+    fn insert_text_snaps_cursor_after_newly_combined_grapheme() {
+        let document = Document::from_json(
+            r#"{
+               "type": "doc",
+               "content": [{
+                   "type": "paragraph",
+                   "content": [{
+                       "type": "text",
+                       "text": "\u0301"
+                   }]
+               }]
+           }"#,
+        )
+        .expect("document must be valid");
+
+        let mut state = EditorState::new(document).expect("editor state must be valid");
+
+        state
+            .insert_text("e")
+            .expect("input must succeed when it creates a grapheme");
+
+        assert_eq!(state.document().text(), "e\u{301}");
+        assert_eq!(
+            state.selection(),
+            TextSelection::cursor(Position::from_utf16_offset(3))
+        );
+
+        state.undo().expect("undo must succeed");
+
+        assert_eq!(state.document().text(), "\u{301}");
+        assert_eq!(
+            state.selection(),
+            TextSelection::cursor(Position::from_utf16_offset(1))
+        );
+
+        state.redo().expect("redo must succeed");
+
+        assert_eq!(state.document().text(), "e\u{301}");
+        assert_eq!(
+            state.selection(),
+            TextSelection::cursor(Position::from_utf16_offset(3))
+        );
     }
 }

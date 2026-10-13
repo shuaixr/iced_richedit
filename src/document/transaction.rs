@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use prosemirror::transform::Step;
+use prosemirror::transform::structure::can_join;
 use prosemirror::transform::transform::StepError as TransformStepError;
 use prosemirror::{
     dynamic::{DynamicNode, types::Dyn},
@@ -258,6 +259,33 @@ impl Transaction {
             Ok(())
         })
     }
+
+    pub(crate) fn join_paragraphs(
+        &mut self,
+        position: Position,
+    ) -> Result<&mut Self, DocumentError> {
+        let offset = position.utf16_offset();
+        let previous_step_count = self.transform.steps.len();
+
+        self.schema.scope(|| {
+            if can_join::<Dyn>(&self.transform.doc, offset) != Some(true) {
+                return Err(DocumentError::TransformFailed(format!(
+                    "paragraphs cannot be joined at position {offset}"
+                )));
+            }
+            self.transform.join(offset, Some(1));
+
+            if self.transform.steps.len() == previous_step_count {
+                return Err(DocumentError::TransformFailed(format!(
+                    "paragraphs could not be joined at position {offset}"
+                )));
+            }
+
+            Ok(())
+        })?;
+
+        Ok(self)
+    }
 }
 pub(crate) struct TransactionResult {
     document: Document,
@@ -270,6 +298,9 @@ impl TransactionResult {
     }
     pub(crate) fn into_parts(self) -> (Document, Option<DocumentChange>) {
         (self.document, self.change)
+    }
+    pub(crate) fn document(&self) -> &Document {
+        &self.document
     }
 }
 
