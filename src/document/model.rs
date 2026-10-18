@@ -1,5 +1,6 @@
 use crate::document::{
-    DocumentError, Mark, Position, TextSelection, schema::DocumentSchema, transaction::Transaction,
+    DocumentError, Mark, ParagraphView, Position, TextSelection, schema::DocumentSchema,
+    transaction::Transaction,
 };
 use prosemirror::{
     dynamic::{DynamicNode, types::Dyn},
@@ -366,6 +367,36 @@ impl Document {
             }
 
             Err(DocumentError::InvalidPosition { position: offset })
+        })
+    }
+
+    pub(crate) fn paragraph_views(&self) -> Result<Vec<ParagraphView>, DocumentError> {
+        self.schema.scope(|| {
+            let mut views = Vec::with_capacity(self.node.child_count());
+            let mut block_start = 0;
+
+            for index in 0..self.node.child_count() {
+                let block = self.node.maybe_child(index).ok_or_else(|| {
+                    DocumentError::InvalidDocument("document block is missing".to_owned())
+                })?;
+
+                if !block.is_textblock() {
+                    return Err(DocumentError::InvalidDocument(
+                        "paragraph projection requires top-level text blocks".to_owned(),
+                    ));
+                }
+
+                let text = Self::navigation_text(block)?;
+
+                views.push(ParagraphView::new(
+                    Position::from_utf16_offset(block_start + 1),
+                    text,
+                ));
+
+                block_start += block.node_size();
+            }
+
+            Ok(views)
         })
     }
 }
