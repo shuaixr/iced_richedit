@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use crate::{
     document::{Document, Mark, Position, TextSelection, TransactionResult},
     editor::{
@@ -36,6 +38,7 @@ impl EditorState {
             .validate_selection(selection)
             .map_err(EditorError::Document)?;
 
+        self.history.close_input_group();
         self.selection = selection;
         self.stored_marks = None;
         Ok(())
@@ -49,19 +52,38 @@ impl EditorState {
         selection: TextSelection,
         stored_marks: Option<Vec<Mark>>,
     ) -> Result<(), EditorError> {
+        self.dispatch_with_input(result, selection, stored_marks, None)
+    }
+
+    fn dispatch_with_input(
+        &mut self,
+        result: TransactionResult,
+        selection: TextSelection,
+        stored_marks: Option<Vec<Mark>>,
+        input: Option<(Vec<Mark>, Instant)>,
+    ) -> Result<(), EditorError> {
         let (document, change) = result.into_parts();
 
         document
             .validate_selection(selection)
             .map_err(EditorError::Document)?;
+
         if let Some(change) = change {
-            self.history.record(HistoryEntry {
+            let entry = HistoryEntry {
                 change,
                 selection_before: self.selection,
                 selection_after: selection,
                 stored_marks_before: self.stored_marks.clone(),
                 stored_marks_after: stored_marks.clone(),
-            });
+            };
+
+            if let Some((marks, now)) = input {
+                self.history
+                    .record_input(entry, marks, now)
+                    .map_err(EditorError::Document)?;
+            } else {
+                self.history.record(entry);
+            }
         }
 
         self.document = document;
@@ -88,16 +110,22 @@ impl EditorState {
         let result = transaction.finish();
         let selection = TextSelection::cursor(from);
 
-        self.dispatch_cursor_edit(result, selection.head(), None)
+        self.dispatch_cursor_edit(result, selection.head(), None, None)
     }
 
     pub fn insert_text(&mut self, text: &str) -> Result<(), EditorError> {
+        self.insert_text_at(text, Instant::now())
+    }
+
+    fn insert_text_at(&mut self, text: &str, now: Instant) -> Result<(), EditorError> {
         if text.is_empty() {
             return Ok(());
         }
 
         let from = self.selection.from();
         let to = self.selection.to();
+        let is_cursor_input = self.selection.is_empty();
+
         let marks = match &self.stored_marks {
             Some(marks) => marks.clone(),
             None => self
@@ -105,10 +133,16 @@ impl EditorState {
                 .marks_at(from)
                 .map_err(EditorError::Document)?,
         };
+
+        let marks = self
+            .document
+            .normalize_marks(&marks)
+            .map_err(EditorError::Document)?;
+
         let stored_marks = self.stored_marks.clone();
         let mut transaction = self.document.transaction();
 
-        if !self.selection.is_empty() {
+        if !is_cursor_input {
             transaction
                 .delete_range(from, to)
                 .map_err(EditorError::Document)?;
@@ -117,10 +151,16 @@ impl EditorState {
         transaction
             .insert_text_with_marks(from, text, &marks)
             .map_err(EditorError::Document)?;
-        let new_offset = from.utf16_offset() + text.encode_utf16().count();
-        let selection = TextSelection::cursor(Position::from_utf16_offset(new_offset));
 
-        self.dispatch_cursor_edit(transaction.finish(), selection.head(), stored_marks)
+        let cursor = Position::from_utf16_offset(from.utf16_offset() + text.encode_utf16().count());
+
+        let input = if is_cursor_input {
+            Some((marks, now))
+        } else {
+            None
+        };
+
+        self.dispatch_cursor_edit(transaction.finish(), cursor, stored_marks, input)
     }
 
     pub fn toggle_mark(&mut self, mark: Mark) -> Result<(), EditorError> {
@@ -164,7 +204,7 @@ impl EditorState {
             .document
             .normalize_marks(&marks)
             .map_err(EditorError::Document)?;
-
+        self.history.close_input_group();
         self.stored_marks = Some(marks);
 
         Ok(())
@@ -188,7 +228,7 @@ impl EditorState {
                 .document
                 .normalize_marks(&marks)
                 .map_err(EditorError::Document)?;
-
+            self.history.close_input_group();
             self.stored_marks = Some(marks);
             return Ok(());
         }
@@ -220,6 +260,7 @@ impl EditorState {
                 .normalize_marks(&marks)
                 .map_err(EditorError::Document)?;
 
+            self.history.close_input_group();
             self.stored_marks = Some(marks);
             return Ok(());
         }
@@ -252,11 +293,12 @@ impl EditorState {
 
         let selection = TextSelection::cursor(Position::from_utf16_offset(from.utf16_offset() + 2));
 
-        self.dispatch_cursor_edit(transaction.finish(), selection.head(), None)
+        self.dispatch_cursor_edit(transaction.finish(), selection.head(), None, None)
     }
 
     pub fn undo(&mut self) -> Result<(), EditorError> {
         let Some(entry) = self.history.undo_entry() else {
+            self.history.close_input_group();
             return Ok(());
         };
 
@@ -284,6 +326,7 @@ impl EditorState {
 
     pub fn redo(&mut self) -> Result<(), EditorError> {
         let Some(entry) = self.history.redo_entry() else {
+            self.history.close_input_group();
             return Ok(());
         };
 
@@ -414,7 +457,7 @@ impl EditorState {
             from
         };
 
-        self.dispatch_cursor_edit(transaction.finish(), cursor, None)
+        self.dispatch_cursor_edit(transaction.finish(), cursor, None, None)
     }
 
     fn dispatch_cursor_edit(
@@ -422,18 +465,21 @@ impl EditorState {
         result: TransactionResult,
         cursor: Position,
         stored_marks: Option<Vec<Mark>>,
+        input: Option<(Vec<Mark>, Instant)>,
     ) -> Result<(), EditorError> {
         let cursor = result
             .document()
             .snap_cursor_forward(cursor)
             .map_err(EditorError::Document)?;
 
-        self.dispatch_transaction(result, TextSelection::cursor(cursor), stored_marks)
+        self.dispatch_with_input(result, TextSelection::cursor(cursor), stored_marks, input)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use crate::{
         document::{Document, DocumentError, Mark, Position, TextSelection},
         editor::error::EditorError,
@@ -1479,6 +1525,168 @@ mod tests {
         assert_eq!(
             state.selection(),
             TextSelection::cursor(Position::from_utf16_offset(3))
+        );
+    }
+
+    #[test]
+    fn consecutive_inputs_share_one_undo_event() {
+        let mut state = EditorState::new(Document::empty().expect("empty document must be valid"))
+            .expect("editor state must be valid");
+
+        let now = std::time::Instant::now();
+
+        state
+            .insert_text_at("H", now)
+            .expect("first input must succeed");
+
+        state
+            .insert_text_at("i", now + std::time::Duration::from_millis(100))
+            .expect("second input must succeed");
+
+        assert_eq!(state.document().text(), "Hi");
+
+        state.undo().expect("undo must succeed");
+
+        assert_eq!(state.document().text(), "");
+        assert!(!state.can_undo());
+        assert!(state.can_redo());
+
+        state.redo().expect("redo must succeed");
+
+        assert_eq!(state.document().text(), "Hi");
+        assert_eq!(
+            state.selection(),
+            TextSelection::cursor(Position::from_utf16_offset(3))
+        );
+    }
+
+    #[test]
+    fn input_grouping_respects_timeout_boundary() {
+        for (delay_ms, expected_after_undo, expected_can_undo) in
+            [(500, "", false), (501, "H", true)]
+        {
+            let document = Document::empty().expect("document must be valid");
+            let mut state = EditorState::new(document).expect("state must be valid");
+            let now = Instant::now();
+
+            state
+                .insert_text_at("H", now)
+                .expect("first input must succeed");
+
+            state
+                .insert_text_at("i", now + Duration::from_millis(delay_ms))
+                .expect("second input must succeed");
+
+            state.undo().expect("undo must succeed");
+
+            assert_eq!(
+                state.document().text(),
+                expected_after_undo,
+                "unexpected grouping for delay {delay_ms} ms"
+            );
+            assert_eq!(
+                state.can_undo(),
+                expected_can_undo,
+                "unexpected undo availability for delay {delay_ms} ms"
+            );
+        }
+    }
+
+    #[test]
+    fn moving_cursor_away_and_back_starts_new_input_group() {
+        let document = Document::empty().expect("document must be valid");
+        let mut state = EditorState::new(document).expect("state must be valid");
+        let now = Instant::now();
+
+        state
+            .insert_text_at("H", now)
+            .expect("first input must succeed");
+
+        state.move_left().expect("left movement must succeed");
+        state.move_right().expect("right movement must succeed");
+
+        state
+            .insert_text_at("i", now + Duration::from_millis(100))
+            .expect("second input must succeed");
+
+        state.undo().expect("first undo must succeed");
+
+        assert_eq!(state.document().text(), "H");
+        assert_eq!(
+            state.selection(),
+            TextSelection::cursor(Position::from_utf16_offset(2))
+        );
+        assert!(state.can_undo());
+
+        state.undo().expect("second undo must succeed");
+
+        assert_eq!(state.document().text(), "");
+        assert!(!state.can_undo());
+    }
+
+    #[test]
+    fn changing_format_starts_new_input_group() {
+        let document = Document::empty().expect("document must be valid");
+        let mut state = EditorState::new(document).expect("state must be valid");
+        let now = Instant::now();
+
+        state
+            .insert_text_at("H", now)
+            .expect("first input must succeed");
+
+        state
+            .toggle_mark(Mark::Strong)
+            .expect("format change must succeed");
+
+        state
+            .insert_text_at("i", now + Duration::from_millis(100))
+            .expect("second input must succeed");
+
+        state.undo().expect("first undo must succeed");
+
+        assert_eq!(state.document().text(), "H");
+        assert_eq!(state.stored_marks(), Some([Mark::Strong].as_slice()));
+        assert!(state.can_undo());
+
+        state.undo().expect("second undo must succeed");
+
+        assert_eq!(state.document().text(), "");
+        assert!(state.stored_marks().is_none());
+        assert!(!state.can_undo());
+
+        state.redo().expect("first redo must succeed");
+        state.redo().expect("second redo must succeed");
+
+        assert_eq!(state.document().text(), "Hi");
+        assert_eq!(state.stored_marks(), Some([Mark::Strong].as_slice()));
+
+        let actual: serde_json::Value = serde_json::from_str(
+            &state
+                .document()
+                .to_json()
+                .expect("serialization must succeed"),
+        )
+        .expect("serialized document must be valid JSON");
+
+        assert_eq!(
+            actual,
+            serde_json::json!({
+                "type": "doc",
+                "content": [{
+                    "type": "paragraph",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "H"
+                        },
+                        {
+                            "type": "text",
+                            "text": "i",
+                            "marks": [{ "type": "strong" }]
+                        }
+                    ]
+                }]
+            })
         );
     }
 }

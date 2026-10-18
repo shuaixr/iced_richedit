@@ -310,6 +310,27 @@ pub(crate) struct DocumentChange {
     inverse: Vec<Step<Dyn>>,
 }
 impl DocumentChange {
+    pub(crate) fn append(&mut self, next: DocumentChange) -> Result<(), DocumentError> {
+        if !Arc::ptr_eq(&self.schema, &next.schema) {
+            return Err(DocumentError::TransformFailed(
+                "cannot merge changes from different document schemas".to_owned(),
+            ));
+        }
+
+        let DocumentChange {
+            forward,
+            mut inverse,
+            ..
+        } = next;
+
+        self.forward.extend(forward);
+
+        inverse.append(&mut self.inverse);
+        self.inverse = inverse;
+
+        Ok(())
+    }
+
     fn apply_steps(
         &self,
         document: &Document,
@@ -325,6 +346,7 @@ impl DocumentChange {
 
         Ok(transaction.commit())
     }
+
     pub(crate) fn apply_forward(&self, document: &Document) -> Result<Document, DocumentError> {
         self.apply_steps(document, &self.forward)
     }
