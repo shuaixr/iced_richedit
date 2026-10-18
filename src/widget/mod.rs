@@ -161,13 +161,31 @@ where
         limits: &layout::Limits,
     ) -> layout::Node {
         let size = limits.resolve(self.width, self.height, Size::new(300.0, 300.0));
-
         let state = tree.state.downcast_mut::<State>();
+
+        let selection = self.editor.selection();
+        let views = self.editor.document().paragraph_views();
+
+        let content_changed = match &views {
+            Ok(views) => {
+                state.has_error
+                    || views.len() != state.paragraphs.len()
+                    || views.iter().zip(&state.paragraphs).any(|(view, previous)| {
+                        previous.view.as_ref().is_none_or(|previous| {
+                            previous.start() != view.start() || previous.text() != view.text()
+                        })
+                    })
+            }
+            Err(_) => false,
+        };
+
+        let selection_changed = state.observed_selection != Some(selection);
+
+        let viewport_changed = state.observed_viewport != Some(size);
 
         state.paragraphs.clear();
         state.has_error = false;
         state.content_height = 0.0;
-
         let content_width = (size.width - PADDING * 2.0).max(0.0);
 
         if content_width == 0.0 {
@@ -176,8 +194,7 @@ where
         }
 
         let font = renderer.default_font();
-
-        match self.editor.document().paragraph_views() {
+        match views {
             Ok(views) => {
                 let mut y = PADDING;
 
@@ -223,6 +240,13 @@ where
             .unwrap_or(PADDING * 2.0);
 
         state.clamp_scroll(size.height);
+
+        if !state.has_error && (content_changed || selection_changed || viewport_changed) {
+            state.reveal_head(selection.head(), size.height, PADDING);
+        }
+
+        state.observed_selection = Some(selection);
+        state.observed_viewport = Some(size);
 
         layout::Node::new(size)
     }

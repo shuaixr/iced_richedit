@@ -1,7 +1,7 @@
 use crate::document::{ParagraphView, Position, TextPosition, TextSelection};
 
 use iced::{
-    Point, Rectangle,
+    Point, Rectangle, Size,
     advanced::{
         graphics::text::{Paragraph, cosmic_text::Cursor},
         widget::operation::Focusable,
@@ -24,6 +24,8 @@ pub(super) struct State {
     pub(super) drag_anchor: Option<Position>,
     pub(super) scroll_y: f32,
     pub(super) content_height: f32,
+    pub(super) observed_selection: Option<TextSelection>,
+    pub(super) observed_viewport: Option<Size>,
 }
 
 impl Focusable for State {
@@ -110,6 +112,34 @@ impl State {
             window_position.x - widget_origin.x,
             window_position.y - widget_origin.y + self.scroll_y,
         )
+    }
+
+    pub(super) fn reveal_head(&mut self, position: Position, viewport_height: f32, padding: f32) {
+        let Some(bounds) = self.caret_bounds(position) else {
+            return;
+        };
+
+        self.reveal_bounds(bounds, viewport_height, padding);
+    }
+
+    fn reveal_bounds(&mut self, bounds: Rectangle, viewport_height: f32, padding: f32) {
+        let available_height = viewport_height - padding * 2.0;
+
+        if available_height <= 0.0 {
+            self.clamp_scroll(viewport_height);
+            return;
+        }
+
+        let visible_top = self.scroll_y + padding;
+        let visible_bottom = self.scroll_y + viewport_height - padding;
+
+        if bounds.height > available_height || bounds.y < visible_top {
+            self.scroll_y = bounds.y - padding;
+        } else if bounds.y + bounds.height > visible_bottom {
+            self.scroll_y = bounds.y + bounds.height - viewport_height + padding;
+        }
+
+        self.clamp_scroll(viewport_height);
     }
 }
 impl LaidOutParagraph {
