@@ -21,7 +21,7 @@ enum Message {
 
 impl Basic {
     fn new() -> Self {
-        let value = serde_json::json!({
+        let mut value = serde_json::json!({
             "type": "doc",
             "content": [
                 {
@@ -60,6 +60,21 @@ impl Basic {
             ]
         });
 
+        let content = value["content"]
+            .as_array_mut()
+            .expect("the built-in example must contain a content array");
+
+        for index in 1..=20 {
+            content.push(serde_json::json!({
+           "type": "paragraph",
+           "content": [{
+               "type": "text",
+               "text": format!(
+                   "Scrollable paragraph {index}. Click here after scrolling to verify document position mapping."
+               )
+           }]
+       }));
+        }
         let document = Document::from_json(&value.to_string())
             .expect("the built-in example document must be valid");
         let editor =
@@ -110,7 +125,7 @@ impl Basic {
         .spacing(8);
 
         let status = self.error.as_deref().unwrap_or(
-            "Use the buttons to verify action dispatch. Keyboard input is not connected yet.",
+            "Click to position the caret and type. Selection dragging and scrolling are not connected yet.",
         );
 
         container(
