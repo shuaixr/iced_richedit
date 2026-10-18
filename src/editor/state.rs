@@ -3,6 +3,7 @@ use std::time::Instant;
 use crate::{
     document::{Document, Mark, Position, TextSelection, TransactionResult},
     editor::{
+        EditorAction,
         error::EditorError,
         history::{History, HistoryEntry},
     },
@@ -473,6 +474,20 @@ impl EditorState {
             .map_err(EditorError::Document)?;
 
         self.dispatch_with_input(result, TextSelection::cursor(cursor), stored_marks, input)
+    }
+
+    pub fn apply(&mut self, action: EditorAction) -> Result<(), EditorError> {
+        match action {
+            EditorAction::InsertText(text) => self.insert_text(&text),
+            EditorAction::SetSelection(selection) => self.set_selection(selection),
+            EditorAction::SplitParagraph => self.split_paragraph(),
+            EditorAction::DeleteBackward => self.delete_backward(),
+            EditorAction::DeleteForward => self.delete_forward(),
+            EditorAction::MoveLeft => self.move_left(),
+            EditorAction::MoveRight => self.move_right(),
+            EditorAction::Undo => self.undo(),
+            EditorAction::Redo => self.redo(),
+        }
     }
 }
 

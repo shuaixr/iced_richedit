@@ -1,16 +1,23 @@
 use iced::{
     Element, Length,
-    widget::{column, container, text},
+    widget::{button, column, container, row, text},
 };
 
-use iced_richedit::{document::Document, editor::EditorState, widget::RichEdit};
+use iced_richedit::{
+    document::Document,
+    editor::{EditorAction, EditorState},
+    widget::RichEdit,
+};
 
 struct Basic {
     editor: EditorState,
+    error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
-enum Message {}
+enum Message {
+    Edit(EditorAction),
+}
 
 impl Basic {
     fn new() -> Self {
@@ -58,23 +65,60 @@ impl Basic {
         let editor =
             EditorState::new(document).expect("the empty document must have an initial selection");
 
-        Self { editor }
+        Self {
+            editor,
+            error: None,
+        }
     }
 
     fn update(&mut self, message: Message) {
-        match message {}
+        match message {
+            Message::Edit(action) => {
+                self.error = self
+                    .editor
+                    .apply(action)
+                    .err()
+                    .map(|error| error.to_string());
+            }
+        }
     }
 
     fn view(&self) -> Element<'_, Message> {
         let editor = RichEdit::new(&self.editor)
             .width(Length::Fill)
-            .height(Length::Fixed(300.0));
+            .height(Length::Fixed(300.0))
+            .on_action(Message::Edit);
+
+        let controls = row![
+            button("Insert")
+                .on_press(Message::Edit(EditorAction::InsertText("Hello ".to_owned()),)),
+            button("Enter").on_press(Message::Edit(EditorAction::SplitParagraph)),
+            button("Backspace").on_press(Message::Edit(EditorAction::DeleteBackward)),
+            button("Left").on_press(Message::Edit(EditorAction::MoveLeft)),
+            button("Right").on_press(Message::Edit(EditorAction::MoveRight)),
+            button("Undo").on_press_maybe(
+                self.editor
+                    .can_undo()
+                    .then_some(Message::Edit(EditorAction::Undo)),
+            ),
+            button("Redo").on_press_maybe(
+                self.editor
+                    .can_redo()
+                    .then_some(Message::Edit(EditorAction::Redo)),
+            ),
+        ]
+        .spacing(8);
+
+        let status = self.error.as_deref().unwrap_or(
+            "Use the buttons to verify action dispatch. Keyboard input is not connected yet.",
+        );
 
         container(
             column![
-                text("Rich editor: static widget skeleton"),
+                text("Rich editor: action dispatch"),
+                controls,
                 editor,
-                text("Text layout and editing are not connected yet."),
+                text(status),
             ]
             .spacing(12),
         )
