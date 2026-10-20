@@ -28,7 +28,7 @@ impl Basic {
                     "type": "paragraph",
                     "content": [{
                         "type": "text",
-                        "text": "This is a long paragraph for checking utomatic wrapping. Resize the window to verify that the text layout follows the available editor width."
+                        "text": "This is a long paragraph for checking automatic wrapping. Resize the window to verify that the text layout follows the available editor width."
                     }]
                 },
                 {
@@ -77,8 +77,8 @@ impl Basic {
         }
         let document = Document::from_json(&value.to_string())
             .expect("the built-in example document must be valid");
-        let editor =
-            EditorState::new(document).expect("the empty document must have an initial selection");
+        let editor = EditorState::new(document)
+            .expect("the example document must have an initial selection");
 
         Self {
             editor,
@@ -125,7 +125,7 @@ impl Basic {
         .spacing(8);
 
         let status = self.error.as_deref().unwrap_or(
-            "Click to position the caret and type. Selection dragging and scrolling are not connected yet.",
+            "Click and drag to select text. Type to replace the selection. Use the mouse wheel to scroll; editing keeps the active position visible. IME and clipboard are not supported yet.",
         );
 
         container(
