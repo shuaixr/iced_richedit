@@ -66,8 +66,8 @@ impl<'a, Message> RichEdit<'a, Message> {
     }
 }
 
-fn make_paragraph(content: &str, width: f32, font: Font) -> Paragraph {
-    Paragraph::with_text(text::Text {
+fn paragraph_text(content: &str, width: f32, font: Font) -> text::Text<&str, Font> {
+    text::Text {
         content,
         bounds: Size::new(width, f32::INFINITY),
         size: Pixels(TEXT_SIZE),
@@ -77,7 +77,11 @@ fn make_paragraph(content: &str, width: f32, font: Font) -> Paragraph {
         align_y: alignment::Vertical::Top,
         shaping: text::Shaping::Advanced,
         wrapping: text::Wrapping::WordOrGlyph,
-    })
+    }
+}
+
+fn make_paragraph(content: &str, width: f32, font: Font) -> Paragraph {
+    Paragraph::with_text(paragraph_text(content, width, font))
 }
 
 fn keyboard_action(
@@ -161,11 +165,13 @@ where
         limits: &layout::Limits,
     ) -> layout::Node {
         let size = limits.resolve(self.width, self.height, Size::new(300.0, 300.0));
+
         let state = tree.state.downcast_mut::<State>();
 
         let selection = self.editor.selection();
         let views = self.editor.document().paragraph_views();
 
+        // Compare against the old projection before taking the layout entries.
         let content_changed = match &views {
             Ok(views) => {
                 state.has_error
@@ -183,9 +189,11 @@ where
 
         let viewport_changed = state.observed_viewport != Some(size);
 
-        state.paragraphs.clear();
+        let mut previous = std::mem::take(&mut state.paragraphs).into_iter();
+
         state.has_error = false;
         state.content_height = 0.0;
+
         let content_width = (size.width - PADDING * 2.0).max(0.0);
 
         if content_width == 0.0 {
@@ -194,14 +202,37 @@ where
         }
 
         let font = renderer.default_font();
+
         match views {
             Ok(views) => {
+                state.paragraphs.reserve(views.len());
+
                 let mut y = PADDING;
 
                 for view in views {
-                    let paragraph = make_paragraph(view.text(), content_width, font);
+                    let previous_item = previous.next();
 
-                    // Empty logical lines must retain a visible line box.
+                    // Document offsets do not affect text shaping.
+                    let reusable = previous_item.filter(|item| {
+                        item.view
+                            .as_ref()
+                            .is_some_and(|old| old.text() == view.text())
+                    });
+
+                    let desired = paragraph_text(view.text(), content_width, font);
+
+                    let paragraph = match reusable {
+                        Some(mut item) => match item.paragraph.compare(desired.with_content(())) {
+                            text::Difference::None => item.paragraph,
+                            text::Difference::Bounds => {
+                                item.paragraph.resize(desired.bounds);
+                                item.paragraph
+                            }
+                            text::Difference::Shape => Paragraph::with_text(desired),
+                        },
+                        None => Paragraph::with_text(desired),
+                    };
+
                     let minimum_height = view.line_count() as f32 * LINE_HEIGHT;
 
                     let height = paragraph.min_height().max(minimum_height);
@@ -349,7 +380,6 @@ where
             if state.is_focused
                 && !state.window_unfocused
                 && !state.has_error
-                && selection.is_empty()
                 && let Some(caret) = state.caret_bounds(selection.head())
             {
                 let caret = Rectangle {
