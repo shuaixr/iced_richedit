@@ -476,6 +476,40 @@ impl EditorState {
         self.dispatch_with_input(result, TextSelection::cursor(cursor), stored_marks, input)
     }
 
+    pub fn select_all(&mut self) -> Result<(), EditorError> {
+        let selection = self
+            .document
+            .full_selection()
+            .map_err(EditorError::Document)?;
+
+        self.set_selection(selection)
+    }
+
+    pub fn extend_left(&mut self) -> Result<(), EditorError> {
+        self.extend_selection(false)
+    }
+
+    pub fn extend_right(&mut self) -> Result<(), EditorError> {
+        self.extend_selection(true)
+    }
+
+    fn extend_selection(&mut self, forward: bool) -> Result<(), EditorError> {
+        let head = self.selection.head();
+
+        let adjacent = if forward {
+            self.document.next_cursor_position(head)
+        } else {
+            self.document.previous_cursor_position(head)
+        }
+        .map_err(EditorError::Document)?;
+
+        let Some(head) = adjacent else {
+            return Ok(());
+        };
+
+        self.set_selection(TextSelection::new(self.selection.anchor(), head))
+    }
+
     pub fn apply(&mut self, action: EditorAction) -> Result<(), EditorError> {
         match action {
             EditorAction::InsertText(text) => self.insert_text(&text),
@@ -487,6 +521,9 @@ impl EditorState {
             EditorAction::MoveRight => self.move_right(),
             EditorAction::Undo => self.undo(),
             EditorAction::Redo => self.redo(),
+            EditorAction::ExtendLeft => self.extend_left(),
+            EditorAction::ExtendRight => self.extend_right(),
+            EditorAction::SelectAll => self.select_all(),
         }
     }
 }

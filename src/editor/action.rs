@@ -12,4 +12,7 @@ pub enum EditorAction {
     MoveRight,
     Undo,
     Redo,
+    ExtendLeft,
+    ExtendRight,
+    SelectAll,
 }

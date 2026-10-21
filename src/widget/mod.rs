@@ -94,6 +94,7 @@ fn keyboard_action(
 
     if modifiers.command() && !modifiers.alt() {
         return match key.to_latin(physical_key) {
+            Some('a') if !modifiers.shift() => Some(EditorAction::SelectAll),
             Some('z') if modifiers.shift() => Some(EditorAction::Redo),
             Some('z') => Some(EditorAction::Undo),
             Some('y') if !cfg!(target_os = "macos") && !modifiers.shift() => {
@@ -118,12 +119,16 @@ fn keyboard_action(
         keyboard::Key::Named(Named::Delete) if !modifiers.shift() => {
             Some(EditorAction::DeleteForward)
         }
-        keyboard::Key::Named(Named::ArrowLeft) if !modifiers.shift() => {
-            Some(EditorAction::MoveLeft)
-        }
-        keyboard::Key::Named(Named::ArrowRight) if !modifiers.shift() => {
-            Some(EditorAction::MoveRight)
-        }
+        keyboard::Key::Named(Named::ArrowLeft) => Some(if modifiers.shift() {
+            EditorAction::ExtendLeft
+        } else {
+            EditorAction::MoveLeft
+        }),
+        keyboard::Key::Named(Named::ArrowRight) => Some(if modifiers.shift() {
+            EditorAction::ExtendRight
+        } else {
+            EditorAction::MoveRight
+        }),
         keyboard::Key::Named(Named::Space) => None,
         keyboard::Key::Named(_) => return None,
         _ => None,

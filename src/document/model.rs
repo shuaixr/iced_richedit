@@ -399,6 +399,25 @@ impl Document {
             Ok(views)
         })
     }
+
+    pub(crate) fn full_selection(&self) -> Result<TextSelection, DocumentError> {
+        let start = self.initial_selection()?.head();
+
+        // The current schema contains top-level paragraphs.
+        // The final paragraph's content ends before its closing boundary.
+        let end = self
+            .schema
+            .scope(|| self.node.content_size().checked_sub(1))
+            .ok_or_else(|| {
+                DocumentError::InvalidDocument("document contains no selectable content".to_owned())
+            })?;
+
+        let selection = TextSelection::new(start, Position::from_utf16_offset(end));
+
+        self.validate_selection(selection)?;
+
+        Ok(selection)
+    }
 }
 
 #[cfg(test)]
