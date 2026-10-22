@@ -583,20 +583,37 @@ where
                     return;
                 }
 
-                let is_copy = modifiers.command()
-                    && !modifiers.alt()
-                    && !modifiers.shift()
-                    && key.to_latin(*physical_key) == Some('c');
+                let clipboard_shortcut =
+                    if modifiers.command() && !modifiers.alt() && !modifiers.shift() {
+                        key.to_latin(*physical_key)
+                    } else {
+                        None
+                    };
 
-                if is_copy {
-                    if !self.editor.selection().is_empty() {
-                        match self.editor.selected_text() {
-                            Ok(text) => {
-                                clipboard.write(clipboard::Kind::Standard, text);
+                if matches!(clipboard_shortcut, Some('c' | 'x')) {
+                    let is_cut = clipboard_shortcut == Some('x');
+
+                    // Cutting requires an editing callback.
+                    if is_cut && self.on_action.is_none() {
+                        return;
+                    }
+
+                    if self.editor.selection().is_empty() {
+                        shell.capture_event();
+                        return;
+                    }
+
+                    match self.editor.selected_text() {
+                        Ok(text) => {
+                            clipboard.write(clipboard::Kind::Standard, text);
+
+                            if is_cut && let Some(on_action) = &self.on_action {
+                                state.drag_anchor = None;
+                                shell.publish(on_action(EditorAction::DeleteSelection));
                             }
-                            Err(error) => {
-                                eprintln!("Failed to copy selected text: {error}");
-                            }
+                        }
+                        Err(error) => {
+                            eprintln!("Failed to extract selected text for clipboard: {error}");
                         }
                     }
 

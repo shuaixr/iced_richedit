@@ -524,6 +524,7 @@ impl EditorState {
             EditorAction::ExtendLeft => self.extend_left(),
             EditorAction::ExtendRight => self.extend_right(),
             EditorAction::SelectAll => self.select_all(),
+            EditorAction::DeleteSelection => self.delete_selection(),
         }
     }
 
@@ -1813,6 +1814,63 @@ mod tests {
         assert_eq!(
             state.selected_text().expect("text extraction must succeed"),
             ""
+        );
+    }
+
+    #[test]
+    fn delete_selection_action_can_be_undone_and_redone() {
+        let document = Document::from_json(
+            r#"{
+               "type": "doc",
+               "content": [{
+                   "type": "paragraph",
+                   "content": [{
+                       "type": "text",
+                       "text": "A😀B"
+                   }]
+               }]
+           }"#,
+        )
+        .expect("document must be valid");
+
+        let mut state = EditorState::new(document).expect("state must be valid");
+
+        let selection = TextSelection::new(
+            Position::from_utf16_offset(4),
+            Position::from_utf16_offset(2),
+        );
+
+        state
+            .set_selection(selection)
+            .expect("selection must be valid");
+
+        assert_eq!(
+            state.selected_text().expect("text extraction must succeed"),
+            "😀"
+        );
+
+        state
+            .apply(crate::editor::EditorAction::DeleteSelection)
+            .expect("deletion must succeed");
+
+        assert_eq!(state.document().text(), "AB");
+        assert_eq!(
+            state.selection(),
+            TextSelection::cursor(Position::from_utf16_offset(2))
+        );
+
+        state.undo().expect("undo must succeed");
+
+        assert_eq!(state.document().text(), "A😀B");
+        assert_eq!(state.selection(), selection);
+        assert!(!state.can_undo());
+
+        state.redo().expect("redo must succeed");
+
+        assert_eq!(state.document().text(), "AB");
+        assert_eq!(
+            state.selection(),
+            TextSelection::cursor(Position::from_utf16_offset(2))
         );
     }
 }

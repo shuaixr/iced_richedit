@@ -8,6 +8,7 @@ pub enum EditorAction {
     SplitParagraph,
     DeleteBackward,
     DeleteForward,
+    DeleteSelection,
     MoveLeft,
     MoveRight,
     Undo,
