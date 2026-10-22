@@ -3,7 +3,7 @@ mod state;
 use iced::{
     Border, Color, Element, Event, Font, Length, Pixels, Point, Rectangle, Size,
     advanced::{
-        Clipboard, Layout, Shell, Widget,
+        Clipboard, Layout, Shell, Widget, clipboard,
         graphics::text::Paragraph,
         layout, mouse, renderer, text,
         widget::{Operation, Tree, tree},
@@ -429,7 +429,7 @@ where
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         _renderer: &Renderer,
-        _clipboard: &mut dyn Clipboard,
+        clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
@@ -580,6 +580,27 @@ where
                     || state.has_error
                     || shell.is_event_captured()
                 {
+                    return;
+                }
+
+                let is_copy = modifiers.command()
+                    && !modifiers.alt()
+                    && !modifiers.shift()
+                    && key.to_latin(*physical_key) == Some('c');
+
+                if is_copy {
+                    if !self.editor.selection().is_empty() {
+                        match self.editor.selected_text() {
+                            Ok(text) => {
+                                clipboard.write(clipboard::Kind::Standard, text);
+                            }
+                            Err(error) => {
+                                eprintln!("Failed to copy selected text: {error}");
+                            }
+                        }
+                    }
+
+                    shell.capture_event();
                     return;
                 }
 

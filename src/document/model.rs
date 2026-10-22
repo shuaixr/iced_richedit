@@ -418,6 +418,49 @@ impl Document {
 
         Ok(selection)
     }
+
+    pub(crate) fn selection_text(&self, selection: TextSelection) -> Result<String, DocumentError> {
+        self.validate_selection(selection)?;
+
+        if selection.is_empty() {
+            return Ok(String::new());
+        }
+
+        let from = selection.from().utf16_offset();
+        let to = selection.to().utf16_offset();
+
+        let mut parts = Vec::new();
+
+        for view in self.paragraph_views()? {
+            let start = view.start().utf16_offset();
+            let length = view.text().encode_utf16().count();
+            let end = start + length;
+
+            if to < start || from > end {
+                continue;
+            }
+
+            let local_from = from.max(start) - start;
+            let local_to = to.min(end) - start;
+
+            let units: Vec<u16> = view
+                .text()
+                .encode_utf16()
+                .skip(local_from)
+                .take(local_to - local_from)
+                .collect();
+
+            let text = String::from_utf16(&units).map_err(|_| {
+                DocumentError::InvalidDocument(
+                    "selected text contains an invalid UTF-16 boundary".to_owned(),
+                )
+            })?;
+
+            parts.push(text);
+        }
+
+        Ok(parts.join("\n"))
+    }
 }
 
 #[cfg(test)]

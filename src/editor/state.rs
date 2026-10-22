@@ -526,6 +526,13 @@ impl EditorState {
             EditorAction::SelectAll => self.select_all(),
         }
     }
+
+    /// Returns the selected plain text without changing editor state.
+    pub fn selected_text(&self) -> Result<String, EditorError> {
+        self.document
+            .selection_text(self.selection)
+            .map_err(EditorError::Document)
+    }
 }
 
 #[cfg(test)]
@@ -1739,6 +1746,73 @@ mod tests {
                     ]
                 }]
             })
+        );
+    }
+
+    #[test]
+    fn selected_text_preserves_paragraphs_and_hard_breaks() {
+        let document = Document::from_json(
+            r#"{
+               "type": "doc",
+               "content": [
+                   {
+                       "type": "paragraph",
+                       "content": [
+                           {
+                               "type": "text",
+                               "text": "A😀"
+                           },
+                           {
+                               "type": "hard_break"
+                           },
+                           {
+                               "type": "text",
+                               "text": "B"
+                           }
+                       ]
+                   },
+                   {
+                       "type": "paragraph"
+                   },
+                   {
+                       "type": "paragraph",
+                       "content": [{
+                           "type": "text",
+                           "text": "CD"
+                       }]
+                   }
+               ]
+           }"#,
+        )
+        .expect("document must be valid");
+
+        let mut state = EditorState::new(document).expect("state must be valid");
+
+        for (anchor, head) in [(2, 11), (11, 2)] {
+            state
+                .set_selection(TextSelection::new(
+                    Position::from_utf16_offset(anchor),
+                    Position::from_utf16_offset(head),
+                ))
+                .expect("selection must be valid");
+
+            let before = state.selection();
+
+            assert_eq!(
+                state.selected_text().expect("text extraction must succeed"),
+                "😀\nB\n\nC"
+            );
+            assert_eq!(state.selection(), before);
+            assert!(!state.can_undo());
+        }
+
+        state
+            .set_selection(TextSelection::cursor(Position::from_utf16_offset(1)))
+            .expect("cursor must be valid");
+
+        assert_eq!(
+            state.selected_text().expect("text extraction must succeed"),
+            ""
         );
     }
 }
