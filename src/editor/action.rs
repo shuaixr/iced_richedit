@@ -4,6 +4,7 @@ use crate::document::TextSelection;
 #[derive(Debug, Clone)]
 pub enum EditorAction {
     InsertText(String),
+    PasteText(String),
     SetSelection(TextSelection),
     SplitParagraph,
     DeleteBackward,

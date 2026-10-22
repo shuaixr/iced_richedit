@@ -286,6 +286,39 @@ impl Transaction {
 
         Ok(self)
     }
+
+    pub(crate) fn replace_plain_text(
+        &mut self,
+        from: Position,
+        to: Position,
+        text: &str,
+        marks: &[Mark],
+    ) -> Result<Position, DocumentError> {
+        if text.is_empty() {
+            return Ok(from);
+        }
+
+        // CRLF is one separator; a remaining CR is another separator.
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+
+        self.delete_range(from, to)?;
+
+        let mut cursor = from;
+
+        for (index, part) in normalized.split('\n').enumerate() {
+            if index > 0 {
+                self.split_paragraph(cursor)?;
+                cursor = Position::from_utf16_offset(cursor.utf16_offset() + 2);
+            }
+
+            self.insert_text_with_marks(cursor, part, marks)?;
+
+            cursor =
+                Position::from_utf16_offset(cursor.utf16_offset() + part.encode_utf16().count());
+        }
+
+        Ok(cursor)
+    }
 }
 pub(crate) struct TransactionResult {
     document: Document,
@@ -309,6 +342,7 @@ pub(crate) struct DocumentChange {
     forward: Vec<Step<Dyn>>,
     inverse: Vec<Step<Dyn>>,
 }
+
 impl DocumentChange {
     pub(crate) fn append(&mut self, next: DocumentChange) -> Result<(), DocumentError> {
         if !Arc::ptr_eq(&self.schema, &next.schema) {

@@ -513,6 +513,7 @@ impl EditorState {
     pub fn apply(&mut self, action: EditorAction) -> Result<(), EditorError> {
         match action {
             EditorAction::InsertText(text) => self.insert_text(&text),
+            EditorAction::PasteText(text) => self.paste_text(&text),
             EditorAction::SetSelection(selection) => self.set_selection(selection),
             EditorAction::SplitParagraph => self.split_paragraph(),
             EditorAction::DeleteBackward => self.delete_backward(),
@@ -533,6 +534,38 @@ impl EditorState {
         self.document
             .selection_text(self.selection)
             .map_err(EditorError::Document)
+    }
+
+    /// Replaces the selection with plain text as one history event.
+    pub fn paste_text(&mut self, text: &str) -> Result<(), EditorError> {
+        if text.is_empty() {
+            return Ok(());
+        }
+
+        let from = self.selection.from();
+        let to = self.selection.to();
+
+        let marks = match &self.stored_marks {
+            Some(marks) => marks.clone(),
+            None => self
+                .document
+                .marks_at(from)
+                .map_err(EditorError::Document)?,
+        };
+
+        let marks = self
+            .document
+            .normalize_marks(&marks)
+            .map_err(EditorError::Document)?;
+
+        let stored_marks = self.stored_marks.clone();
+        let mut transaction = self.document.transaction();
+
+        let cursor = transaction
+            .replace_plain_text(from, to, text, &marks)
+            .map_err(EditorError::Document)?;
+
+        self.dispatch_cursor_edit(transaction.finish(), cursor, stored_marks, None)
     }
 }
 
@@ -1872,5 +1905,180 @@ mod tests {
             state.selection(),
             TextSelection::cursor(Position::from_utf16_offset(2))
         );
+    }
+
+    #[test]
+    fn paste_text_normalizes_separators_and_preserves_empty_paragraphs() {
+        let cases = [
+            ("A\r\nB", "A\nB", 2),
+            ("A\rB", "A\nB", 2),
+            ("A\n\rB", "A\n\nB", 3),
+            ("A\n\n😀\n", "A\n\n😀\n", 4),
+        ];
+
+        for (input, expected, paragraph_count) in cases {
+            let document = Document::empty().expect("document must be valid");
+            let mut state = EditorState::new(document).expect("state must be valid");
+
+            state
+                .apply(crate::editor::EditorAction::PasteText(input.to_owned()))
+                .expect("paste must succeed");
+
+            let after = state.document().to_json().expect("document must serialize");
+
+            let value: serde_json::Value =
+                serde_json::from_str(&after).expect("JSON must be valid");
+
+            assert_eq!(
+                value["content"]
+                    .as_array()
+                    .expect("document must contain blocks")
+                    .len(),
+                paragraph_count
+            );
+
+            let expected_cursor = 1
+                + expected
+                    .split('\n')
+                    .map(|part| part.encode_utf16().count())
+                    .sum::<usize>()
+                + 2 * (paragraph_count - 1);
+
+            assert_eq!(
+                state.selection(),
+                TextSelection::cursor(Position::from_utf16_offset(expected_cursor))
+            );
+
+            state.select_all().expect("select all must succeed");
+
+            assert_eq!(
+                state.selected_text().expect("text extraction must succeed"),
+                expected
+            );
+
+            state.undo().expect("undo must succeed");
+
+            assert_eq!(state.document().text(), "");
+            assert!(!state.can_undo());
+
+            state.redo().expect("redo must succeed");
+
+            assert_eq!(
+                state.document().to_json().expect("document must serialize"),
+                after
+            );
+        }
+    }
+
+    #[test]
+    fn paste_text_replaces_backward_selection_in_one_history_event() {
+        let document = Document::from_json(
+            r#"{
+               "type": "doc",
+               "content": [{
+                   "type": "paragraph",
+                   "content": [{
+                       "type": "text",
+                       "text": "ABC"
+                   }]
+               }]
+           }"#,
+        )
+        .expect("document must be valid");
+
+        let mut state = EditorState::new(document).expect("state must be valid");
+
+        let selection = TextSelection::new(
+            Position::from_utf16_offset(3),
+            Position::from_utf16_offset(2),
+        );
+
+        state
+            .set_selection(selection)
+            .expect("selection must be valid");
+
+        let before = state.document().to_json().expect("document must serialize");
+
+        state.paste_text("X\nY").expect("paste must succeed");
+
+        assert_eq!(
+            state.selection(),
+            TextSelection::cursor(Position::from_utf16_offset(6))
+        );
+
+        let after = state.document().to_json().expect("document must serialize");
+
+        state.select_all().expect("select all must succeed");
+
+        assert_eq!(
+            state.selected_text().expect("text extraction must succeed"),
+            "AX\nYC"
+        );
+
+        state.undo().expect("undo must succeed");
+
+        assert_eq!(
+            state.document().to_json().expect("document must serialize"),
+            before
+        );
+        assert_eq!(state.selection(), selection);
+        assert!(!state.can_undo());
+
+        state.redo().expect("redo must succeed");
+
+        assert_eq!(
+            state.document().to_json().expect("document must serialize"),
+            after
+        );
+    }
+
+    #[test]
+    fn paste_text_is_separate_from_surrounding_input_history() {
+        let document = Document::empty().expect("document must be valid");
+        let mut state = EditorState::new(document).expect("state must be valid");
+
+        state.insert_text("A").expect("input must succeed");
+        state.paste_text("B").expect("paste must succeed");
+        state.insert_text("C").expect("input must succeed");
+
+        assert_eq!(state.document().text(), "ABC");
+
+        state.undo().expect("undo must succeed");
+        assert_eq!(state.document().text(), "AB");
+
+        state.undo().expect("undo must succeed");
+        assert_eq!(state.document().text(), "A");
+
+        state.undo().expect("undo must succeed");
+        assert_eq!(state.document().text(), "");
+        assert!(!state.can_undo());
+    }
+
+    #[test]
+    fn pasting_empty_text_preserves_selection_and_document() {
+        let document = Document::from_json(
+            r#"{
+               "type": "doc",
+               "content": [{
+                   "type": "paragraph",
+                   "content": [{
+                       "type": "text",
+                       "text": "AB"
+                   }]
+               }]
+           }"#,
+        )
+        .expect("document must be valid");
+
+        let mut state = EditorState::new(document).expect("state must be valid");
+
+        state.select_all().expect("select all must succeed");
+        let selection = state.selection();
+
+        state.paste_text("").expect("empty paste must succeed");
+
+        assert_eq!(state.document().text(), "AB");
+        assert_eq!(state.selection(), selection);
+        assert!(!state.can_undo());
     }
 }

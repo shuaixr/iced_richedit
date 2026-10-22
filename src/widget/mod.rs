@@ -625,6 +625,18 @@ where
                     return;
                 };
 
+                if clipboard_shortcut == Some('v') {
+                    if let Some(text) = clipboard.read(clipboard::Kind::Standard)
+                        && !text.is_empty()
+                    {
+                        state.drag_anchor = None;
+                        shell.publish(on_action(EditorAction::PasteText(text)));
+                    }
+
+                    shell.capture_event();
+                    return;
+                }
+
                 if let Some(action) =
                     keyboard_action(key, *physical_key, *modifiers, text.as_deref())
                 {
