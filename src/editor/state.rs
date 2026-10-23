@@ -536,6 +536,10 @@ impl EditorState {
             EditorAction::MoveWordRight => self.move_word_right(),
             EditorAction::ExtendWordLeft => self.extend_word_left(),
             EditorAction::ExtendWordRight => self.extend_word_right(),
+            EditorAction::MoveDocumentStart => self.move_document_start(),
+            EditorAction::MoveDocumentEnd => self.move_document_end(),
+            EditorAction::ExtendDocumentStart => self.extend_document_start(),
+            EditorAction::ExtendDocumentEnd => self.extend_document_end(),
             EditorAction::Undo => self.undo(),
             EditorAction::Redo => self.redo(),
             EditorAction::ExtendLeft => self.extend_left(),
@@ -619,6 +623,43 @@ impl EditorState {
 
         let Some(target) = target else {
             return Ok(());
+        };
+
+        let selection = if extend {
+            TextSelection::new(self.selection.anchor(), target)
+        } else {
+            TextSelection::cursor(target)
+        };
+
+        self.set_selection(selection)
+    }
+
+    pub fn move_document_start(&mut self) -> Result<(), EditorError> {
+        self.navigate_document_boundary(false, false)
+    }
+
+    pub fn move_document_end(&mut self) -> Result<(), EditorError> {
+        self.navigate_document_boundary(true, false)
+    }
+
+    pub fn extend_document_start(&mut self) -> Result<(), EditorError> {
+        self.navigate_document_boundary(false, true)
+    }
+
+    pub fn extend_document_end(&mut self) -> Result<(), EditorError> {
+        self.navigate_document_boundary(true, true)
+    }
+
+    fn navigate_document_boundary(&mut self, end: bool, extend: bool) -> Result<(), EditorError> {
+        let full_selection = self
+            .document
+            .full_selection()
+            .map_err(EditorError::Document)?;
+
+        let target = if end {
+            full_selection.to()
+        } else {
+            full_selection.from()
         };
 
         let selection = if extend {
@@ -2320,5 +2361,108 @@ mod tests {
             state.selection(),
             TextSelection::cursor(Position::from_utf16_offset(1))
         );
+    }
+
+    #[test]
+    fn document_boundary_navigation_preserves_anchor_when_extending() {
+        let document = Document::from_json(
+            r#"{
+               "type": "doc",
+               "content": [
+                   {
+                       "type": "paragraph",
+                       "content": [{
+                           "type": "text",
+                           "text": "A"
+                       }]
+                   },
+                   {
+                       "type": "paragraph"
+                   },
+                   {
+                       "type": "paragraph",
+                       "content": [{
+                           "type": "text",
+                           "text": "😀"
+                       }]
+                   }
+               ]
+           }"#,
+        )
+        .expect("document must be valid");
+
+        let mut state = EditorState::new(document).expect("state must be valid");
+
+        state
+            .set_selection(TextSelection::cursor(Position::from_utf16_offset(4)))
+            .expect("selection must be valid");
+
+        state
+            .apply(crate::editor::EditorAction::ExtendDocumentEnd)
+            .expect("extension must succeed");
+
+        assert_eq!(
+            state.selection(),
+            TextSelection::new(
+                Position::from_utf16_offset(4),
+                Position::from_utf16_offset(8),
+            )
+        );
+
+        state
+            .apply(crate::editor::EditorAction::ExtendDocumentStart)
+            .expect("extension must succeed");
+
+        assert_eq!(
+            state.selection(),
+            TextSelection::new(
+                Position::from_utf16_offset(4),
+                Position::from_utf16_offset(1),
+            )
+        );
+
+        state
+            .apply(crate::editor::EditorAction::MoveDocumentEnd)
+            .expect("navigation must succeed");
+
+        assert_eq!(
+            state.selection(),
+            TextSelection::cursor(Position::from_utf16_offset(8))
+        );
+
+        state
+            .apply(crate::editor::EditorAction::MoveDocumentStart)
+            .expect("navigation must succeed");
+
+        assert_eq!(
+            state.selection(),
+            TextSelection::cursor(Position::from_utf16_offset(1))
+        );
+
+        assert!(!state.can_undo());
+    }
+
+    #[test]
+    fn document_boundary_navigation_keeps_empty_document_cursor_valid() {
+        let document = Document::empty().expect("document must be valid");
+        let mut state = EditorState::new(document).expect("state must be valid");
+
+        let actions = [
+            crate::editor::EditorAction::MoveDocumentStart,
+            crate::editor::EditorAction::MoveDocumentEnd,
+            crate::editor::EditorAction::ExtendDocumentStart,
+            crate::editor::EditorAction::ExtendDocumentEnd,
+        ];
+
+        for action in actions {
+            state.apply(action).expect("navigation must succeed");
+
+            assert_eq!(
+                state.selection(),
+                TextSelection::cursor(Position::from_utf16_offset(1))
+            );
+        }
+
+        assert!(!state.can_undo());
     }
 }

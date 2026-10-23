@@ -91,6 +91,27 @@ fn keyboard_action(
     committed_text: Option<&str>,
 ) -> Option<EditorAction> {
     use keyboard::key::Named;
+    let document_boundary =
+        if modifiers.command() && !modifiers.alt() && !(modifiers.control() && modifiers.logo()) {
+            match key {
+                keyboard::Key::Named(Named::Home) if !cfg!(target_os = "macos") => Some(false),
+                keyboard::Key::Named(Named::End) if !cfg!(target_os = "macos") => Some(true),
+                keyboard::Key::Named(Named::ArrowUp) if cfg!(target_os = "macos") => Some(false),
+                keyboard::Key::Named(Named::ArrowDown) if cfg!(target_os = "macos") => Some(true),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+    if let Some(end) = document_boundary {
+        return Some(match (end, modifiers.shift()) {
+            (false, false) => EditorAction::MoveDocumentStart,
+            (true, false) => EditorAction::MoveDocumentEnd,
+            (false, true) => EditorAction::ExtendDocumentStart,
+            (true, true) => EditorAction::ExtendDocumentEnd,
+        });
+    }
     let is_word_command =
         modifiers.jump() && !modifiers.logo() && !(modifiers.control() && modifiers.alt());
 
