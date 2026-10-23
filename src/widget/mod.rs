@@ -91,10 +91,10 @@ fn keyboard_action(
     committed_text: Option<&str>,
 ) -> Option<EditorAction> {
     use keyboard::key::Named;
-    let is_word_navigation =
+    let is_word_command =
         modifiers.jump() && !modifiers.logo() && !(modifiers.control() && modifiers.alt());
 
-    if is_word_navigation {
+    if is_word_command {
         match key {
             keyboard::Key::Named(Named::ArrowLeft) => {
                 return Some(if modifiers.shift() {
@@ -109,6 +109,12 @@ fn keyboard_action(
                 } else {
                     EditorAction::MoveWordRight
                 });
+            }
+            keyboard::Key::Named(Named::Backspace) if !modifiers.shift() => {
+                return Some(EditorAction::DeleteWordBackward);
+            }
+            keyboard::Key::Named(Named::Delete) if !modifiers.shift() => {
+                return Some(EditorAction::DeleteWordForward);
             }
             _ => {}
         }

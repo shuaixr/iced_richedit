@@ -400,21 +400,31 @@ impl EditorState {
     }
 
     pub fn delete_backward(&mut self) -> Result<(), EditorError> {
-        self.delete_adjacent(false)
+        self.delete_adjacent(false, false)
     }
 
     pub fn delete_forward(&mut self) -> Result<(), EditorError> {
-        self.delete_adjacent(true)
+        self.delete_adjacent(true, false)
     }
 
-    fn delete_adjacent(&mut self, forward: bool) -> Result<(), EditorError> {
+    pub fn delete_word_backward(&mut self) -> Result<(), EditorError> {
+        self.delete_adjacent(false, true)
+    }
+
+    pub fn delete_word_forward(&mut self) -> Result<(), EditorError> {
+        self.delete_adjacent(true, true)
+    }
+
+    fn delete_adjacent(&mut self, forward: bool, by_word: bool) -> Result<(), EditorError> {
         if !self.selection.is_empty() {
             return self.delete_selection();
         }
 
         let current = self.selection.head();
 
-        let adjacent = if forward {
+        let adjacent = if by_word {
+            self.document.adjacent_word_position(current, forward)
+        } else if forward {
             self.document.next_cursor_position(current)
         } else {
             self.document.previous_cursor_position(current)
@@ -518,6 +528,8 @@ impl EditorState {
             EditorAction::SplitParagraph => self.split_paragraph(),
             EditorAction::DeleteBackward => self.delete_backward(),
             EditorAction::DeleteForward => self.delete_forward(),
+            EditorAction::DeleteWordBackward => self.delete_word_backward(),
+            EditorAction::DeleteWordForward => self.delete_word_forward(),
             EditorAction::MoveLeft => self.move_left(),
             EditorAction::MoveRight => self.move_right(),
             EditorAction::MoveWordLeft => self.move_word_left(),

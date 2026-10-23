@@ -10,6 +10,8 @@ pub enum EditorAction {
     DeleteBackward,
     DeleteForward,
     DeleteSelection,
+    DeleteWordBackward,
+    DeleteWordForward,
     MoveLeft,
     MoveRight,
     MoveWordLeft,
