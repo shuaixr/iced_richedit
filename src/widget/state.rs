@@ -144,20 +144,30 @@ impl State {
 }
 impl LaidOutParagraph {
     fn caret_bounds(&self, position: Position) -> Option<Rectangle> {
-        let view = self.view.as_ref()?;
-        let text_position = view.text_position(position)?;
-        let line_text = view.line_text(text_position.line)?;
+        // Preserve the existing downstream preference at soft wraps.
+        self.caret_candidates(position).last()
+    }
 
-        let mut caret = None;
+    fn caret_candidates(&self, position: Position) -> impl Iterator<Item = Rectangle> + '_ {
+        let view = self.view.as_ref();
 
-        for run in self.paragraph.buffer().layout_runs() {
-            if run.line_i != text_position.line {
-                continue;
-            }
+        let text_position = view.and_then(|view| view.text_position(position));
 
-            if run.glyphs.is_empty() {
-                if text_position.byte == 0 {
-                    caret = Some(Rectangle {
+        self.paragraph
+            .buffer()
+            .layout_runs()
+            .filter_map(move |run| {
+                let view = view?;
+                let text_position = text_position?;
+
+                if run.line_i != text_position.line {
+                    return None;
+                }
+
+                let line_text = view.line_text(text_position.line)?;
+
+                if run.glyphs.is_empty() {
+                    return (text_position.byte == 0).then_some(Rectangle {
                         x: self.origin.x,
                         y: self.origin.y + run.line_top,
                         width: 1.5,
@@ -165,69 +175,58 @@ impl LaidOutParagraph {
                     });
                 }
 
-                continue;
-            }
+                // Prefer a cluster starting at the cursor over one ending there.
+                let glyph = run
+                    .glyphs
+                    .iter()
+                    .find(|glyph| {
+                        glyph.start <= text_position.byte && text_position.byte < glyph.end
+                    })
+                    .or_else(|| {
+                        run.glyphs
+                            .iter()
+                            .find(|glyph| glyph.end == text_position.byte)
+                    })?;
 
-            // Prefer a cluster starting at the cursor over one ending there.
-            let glyph = run
-                .glyphs
-                .iter()
-                .find(|glyph| glyph.start <= text_position.byte && text_position.byte < glyph.end)
-                .or_else(|| {
-                    run.glyphs
-                        .iter()
-                        .find(|glyph| glyph.end == text_position.byte)
-                });
+                let cluster = line_text.get(glyph.start..glyph.end)?;
+                let prefix = line_text.get(glyph.start..text_position.byte)?;
 
-            let Some(glyph) = glyph else {
-                continue;
-            };
+                let grapheme_count = cluster.graphemes(true).count();
 
-            let cluster = line_text.get(glyph.start..glyph.end)?;
-            let prefix = line_text.get(glyph.start..text_position.byte)?;
+                if grapheme_count == 0 {
+                    return None;
+                }
 
-            let grapheme_count = cluster.graphemes(true).count();
+                let preceding = prefix.graphemes(true).count();
+                let fraction = preceding as f32 / grapheme_count as f32;
 
-            if grapheme_count == 0 {
-                continue;
-            }
+                // Several glyphs can belong to the same shaping cluster.
+                let mut left = f32::INFINITY;
+                let mut right = f32::NEG_INFINITY;
 
-            let preceding = prefix.graphemes(true).count();
+                for part in run
+                    .glyphs
+                    .iter()
+                    .filter(|part| part.start == glyph.start && part.end == glyph.end)
+                {
+                    left = left.min(part.x);
+                    right = right.max(part.x + part.w);
+                }
 
-            let fraction = preceding as f32 / grapheme_count as f32;
+                let x = if glyph.level.is_rtl() {
+                    right - (right - left) * fraction
+                } else {
+                    left + (right - left) * fraction
+                };
 
-            // Several glyphs can belong to the same shaping cluster.
-            // Use their combined advance range instead of a single glyph.
-            let mut left = f32::INFINITY;
-            let mut right = f32::NEG_INFINITY;
-
-            for part in run
-                .glyphs
-                .iter()
-                .filter(|part| part.start == glyph.start && part.end == glyph.end)
-            {
-                left = left.min(part.x);
-                right = right.max(part.x + part.w);
-            }
-
-            let x = if glyph.level.is_rtl() {
-                right - (right - left) * fraction
-            } else {
-                left + (right - left) * fraction
-            };
-
-            // Later matching runs win at a soft-wrap boundary.
-            caret = Some(Rectangle {
-                x: self.origin.x + x,
-                y: self.origin.y + run.line_top,
-                width: 1.5,
-                height: run.line_height,
-            });
-        }
-
-        caret
+                Some(Rectangle {
+                    x: self.origin.x + x,
+                    y: self.origin.y + run.line_top,
+                    width: 1.5,
+                    height: run.line_height,
+                })
+            })
     }
-
     fn selection_bounds(&self, selection: TextSelection) -> Vec<Rectangle> {
         let Some(view) = &self.view else {
             return Vec::new();
@@ -345,5 +344,62 @@ mod tests {
         state.clamp_scroll(300.0);
 
         assert_eq!(state.scroll_y, 0.0);
+    }
+
+    #[test]
+    fn soft_wrap_exposes_both_caret_candidates_and_defaults_downstream() {
+        use crate::document::{Document, Position};
+        use iced::{Font, Point};
+
+        use super::LaidOutParagraph;
+
+        let text = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz";
+
+        let document = Document::from_json(
+            &serde_json::json!({
+                "type": "doc",
+                "content": [{
+                    "type": "paragraph",
+                    "content": [{
+                        "type": "text",
+                        "text": text
+                    }]
+                }]
+            })
+            .to_string(),
+        )
+        .expect("document must be valid");
+
+        let view = document
+            .paragraph_views()
+            .expect("projection must succeed")
+            .into_iter()
+            .next()
+            .expect("paragraph must exist");
+
+        let start = view.start().utf16_offset();
+
+        let item = LaidOutParagraph {
+            paragraph: super::super::make_paragraph(text, 48.0, Font::DEFAULT),
+            origin: Point::new(12.0, 20.0),
+            height: 500.0,
+            view: Some(view),
+        };
+
+        let position = (0..=text.len())
+            .map(|offset| Position::from_utf16_offset(start + offset))
+            .find(|&position| item.caret_candidates(position).count() > 1)
+            .expect("wrapped text must have a shared caret position");
+
+        let candidates: Vec<_> = item.caret_candidates(position).collect();
+
+        let upstream = candidates.first().expect("upstream candidate must exist");
+
+        let downstream = candidates.last().expect("downstream candidate must exist");
+
+        assert!(upstream.y < downstream.y);
+        assert!(upstream.x > downstream.x);
+
+        assert_eq!(item.caret_bounds(position), Some(*downstream));
     }
 }
