@@ -91,7 +91,28 @@ fn keyboard_action(
     committed_text: Option<&str>,
 ) -> Option<EditorAction> {
     use keyboard::key::Named;
+    let is_word_navigation =
+        modifiers.jump() && !modifiers.logo() && !(modifiers.control() && modifiers.alt());
 
+    if is_word_navigation {
+        match key {
+            keyboard::Key::Named(Named::ArrowLeft) => {
+                return Some(if modifiers.shift() {
+                    EditorAction::ExtendWordLeft
+                } else {
+                    EditorAction::MoveWordLeft
+                });
+            }
+            keyboard::Key::Named(Named::ArrowRight) => {
+                return Some(if modifiers.shift() {
+                    EditorAction::ExtendWordRight
+                } else {
+                    EditorAction::MoveWordRight
+                });
+            }
+            _ => {}
+        }
+    }
     if modifiers.command() && !modifiers.alt() {
         return match key.to_latin(physical_key) {
             Some('a') if !modifiers.shift() => Some(EditorAction::SelectAll),
@@ -104,7 +125,7 @@ fn keyboard_action(
         };
     }
 
-    // Modified navigation and AltGr input are outside this initial keymap.
+    // Other modified navigation and AltGr text input are not handled yet.
     if modifiers.control() || modifiers.alt() || modifiers.logo() {
         return None;
     }

@@ -520,6 +520,10 @@ impl EditorState {
             EditorAction::DeleteForward => self.delete_forward(),
             EditorAction::MoveLeft => self.move_left(),
             EditorAction::MoveRight => self.move_right(),
+            EditorAction::MoveWordLeft => self.move_word_left(),
+            EditorAction::MoveWordRight => self.move_word_right(),
+            EditorAction::ExtendWordLeft => self.extend_word_left(),
+            EditorAction::ExtendWordRight => self.extend_word_right(),
             EditorAction::Undo => self.undo(),
             EditorAction::Redo => self.redo(),
             EditorAction::ExtendLeft => self.extend_left(),
@@ -566,6 +570,52 @@ impl EditorState {
             .map_err(EditorError::Document)?;
 
         self.dispatch_cursor_edit(transaction.finish(), cursor, stored_marks, None)
+    }
+
+    pub fn move_word_left(&mut self) -> Result<(), EditorError> {
+        self.navigate_word(false, false)
+    }
+
+    pub fn move_word_right(&mut self) -> Result<(), EditorError> {
+        self.navigate_word(true, false)
+    }
+
+    pub fn extend_word_left(&mut self) -> Result<(), EditorError> {
+        self.navigate_word(false, true)
+    }
+
+    pub fn extend_word_right(&mut self) -> Result<(), EditorError> {
+        self.navigate_word(true, true)
+    }
+
+    fn navigate_word(&mut self, forward: bool, extend: bool) -> Result<(), EditorError> {
+        // Match ordinary horizontal navigation: collapse a selection first.
+        if !extend && !self.selection.is_empty() {
+            let target = if forward {
+                self.selection.to()
+            } else {
+                self.selection.from()
+            };
+
+            return self.set_selection(TextSelection::cursor(target));
+        }
+
+        let target = self
+            .document
+            .adjacent_word_position(self.selection.head(), forward)
+            .map_err(EditorError::Document)?;
+
+        let Some(target) = target else {
+            return Ok(());
+        };
+
+        let selection = if extend {
+            TextSelection::new(self.selection.anchor(), target)
+        } else {
+            TextSelection::cursor(target)
+        };
+
+        self.set_selection(selection)
     }
 }
 
@@ -2080,5 +2130,183 @@ mod tests {
         assert_eq!(state.document().text(), "AB");
         assert_eq!(state.selection(), selection);
         assert!(!state.can_undo());
+    }
+
+    #[test]
+    fn word_navigation_skips_whitespace_and_preserves_selection_anchor() {
+        let document = Document::from_json(
+            r#"{
+               "type": "doc",
+               "content": [{
+                   "type": "paragraph",
+                   "content": [{
+                       "type": "text",
+                       "text": "one  two"
+                   }]
+               }]
+           }"#,
+        )
+        .expect("document must be valid");
+
+        let mut state = EditorState::new(document).expect("state must be valid");
+
+        state
+            .apply(crate::editor::EditorAction::MoveWordRight)
+            .expect("navigation must succeed");
+
+        assert_eq!(
+            state.selection(),
+            TextSelection::cursor(Position::from_utf16_offset(4))
+        );
+
+        state
+            .apply(crate::editor::EditorAction::ExtendWordRight)
+            .expect("extension must succeed");
+
+        assert_eq!(
+            state.selection(),
+            TextSelection::new(
+                Position::from_utf16_offset(4),
+                Position::from_utf16_offset(9),
+            )
+        );
+
+        state
+            .apply(crate::editor::EditorAction::ExtendWordLeft)
+            .expect("extension must succeed");
+
+        assert_eq!(
+            state.selection(),
+            TextSelection::new(
+                Position::from_utf16_offset(4),
+                Position::from_utf16_offset(6),
+            )
+        );
+
+        state.extend_word_left().expect("extension must succeed");
+
+        assert_eq!(
+            state.selection(),
+            TextSelection::new(
+                Position::from_utf16_offset(4),
+                Position::from_utf16_offset(1),
+            )
+        );
+
+        state.move_word_right().expect("navigation must succeed");
+
+        assert_eq!(
+            state.selection(),
+            TextSelection::cursor(Position::from_utf16_offset(4))
+        );
+        assert!(!state.can_undo());
+    }
+
+    #[test]
+    fn word_navigation_crosses_paragraph_boundaries_without_skipping_empty_blocks() {
+        let document = Document::from_json(
+            r#"{
+               "type": "doc",
+               "content": [
+                   {
+                       "type": "paragraph",
+                       "content": [{
+                           "type": "text",
+                           "text": "A"
+                       }]
+                   },
+                   {
+                       "type": "paragraph"
+                   },
+                   {
+                       "type": "paragraph",
+                       "content": [{
+                           "type": "text",
+                           "text": "B"
+                       }]
+                   }
+               ]
+           }"#,
+        )
+        .expect("document must be valid");
+
+        let mut state = EditorState::new(document).expect("state must be valid");
+
+        for offset in [2, 4, 6, 7] {
+            state.move_word_right().expect("navigation must succeed");
+
+            assert_eq!(
+                state.selection(),
+                TextSelection::cursor(Position::from_utf16_offset(offset))
+            );
+        }
+
+        // Moving beyond the document is a successful no-op.
+        state
+            .move_word_right()
+            .expect("boundary navigation must succeed");
+
+        assert_eq!(
+            state.selection(),
+            TextSelection::cursor(Position::from_utf16_offset(7))
+        );
+
+        for offset in [6, 4, 2, 1] {
+            state.move_word_left().expect("navigation must succeed");
+
+            assert_eq!(
+                state.selection(),
+                TextSelection::cursor(Position::from_utf16_offset(offset))
+            );
+        }
+
+        assert!(!state.can_undo());
+    }
+
+    #[test]
+    fn word_navigation_preserves_combining_character_boundaries() {
+        let document = Document::from_json(
+            r#"{
+               "type": "doc",
+               "content": [{
+                   "type": "paragraph",
+                   "content": [{
+                       "type": "text",
+                       "text": "e\u0301 x"
+                   }]
+               }]
+           }"#,
+        )
+        .expect("document must be valid");
+
+        let mut state = EditorState::new(document).expect("state must be valid");
+
+        state.move_word_right().expect("navigation must succeed");
+
+        assert_eq!(
+            state.selection(),
+            TextSelection::cursor(Position::from_utf16_offset(3))
+        );
+
+        state.move_word_right().expect("navigation must succeed");
+
+        assert_eq!(
+            state.selection(),
+            TextSelection::cursor(Position::from_utf16_offset(5))
+        );
+
+        state.move_word_left().expect("navigation must succeed");
+
+        assert_eq!(
+            state.selection(),
+            TextSelection::cursor(Position::from_utf16_offset(4))
+        );
+
+        state.move_word_left().expect("navigation must succeed");
+
+        assert_eq!(
+            state.selection(),
+            TextSelection::cursor(Position::from_utf16_offset(1))
+        );
     }
 }

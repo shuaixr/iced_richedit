@@ -461,6 +461,80 @@ impl Document {
 
         Ok(parts.join("\n"))
     }
+
+    pub(crate) fn adjacent_word_position(
+        &self,
+        position: Position,
+        forward: bool,
+    ) -> Result<Option<Position>, DocumentError> {
+        if self.cursor_at_paragraph_boundary(position, forward)? {
+            return if forward {
+                self.next_cursor_position(position)
+            } else {
+                self.previous_cursor_position(position)
+            };
+        }
+
+        self.schema.scope(|| {
+            let offset = position.utf16_offset();
+
+            let resolved = ResolvedPos::<Dyn>::resolve(&self.node, offset)
+                .map_err(|_| DocumentError::InvalidPosition { position: offset })?;
+
+            let content_start = resolved.start(resolved.depth);
+            let local_offset = offset - content_start;
+            let text = Self::navigation_text(resolved.parent())?;
+
+            let mut byte = 0;
+            let mut utf16_offset = 0;
+
+            for character in text.chars() {
+                if utf16_offset >= local_offset {
+                    break;
+                }
+
+                byte += character.len_utf8();
+                utf16_offset += character.len_utf16();
+            }
+
+            let target_byte = if forward {
+                text[byte..]
+                    .split_word_bound_indices()
+                    .find(|(_, segment)| !segment.trim().is_empty())
+                    .map(|(index, segment)| byte + index + segment.len())
+                    .unwrap_or(text.len())
+            } else {
+                text[..byte]
+                    .split_word_bound_indices()
+                    .rfind(|(_, segment)| !segment.trim().is_empty())
+                    .map(|(index, _)| index)
+                    .unwrap_or(0)
+            };
+
+            // Word boundaries must not produce a cursor inside a grapheme.
+            let mut boundaries = text
+                .grapheme_indices(true)
+                .map(|(index, _)| index)
+                .chain(std::iter::once(text.len()));
+
+            let target_byte = if forward {
+                boundaries.find(|&index| index >= target_byte)
+            } else {
+                boundaries.take_while(|&index| index <= target_byte).last()
+            }
+            .ok_or_else(|| {
+                DocumentError::InvalidDocument(
+                    "word navigation found no valid grapheme boundary".to_owned(),
+                )
+            })?;
+
+            let target_offset = text[..target_byte].encode_utf16().count();
+
+            Ok(Some(Position::from_utf16_offset(
+                content_start + target_offset,
+            )))
+        })
+    }
 }
 
 #[cfg(test)]
