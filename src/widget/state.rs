@@ -15,6 +15,12 @@ pub(super) struct LaidOutParagraph {
     pub(super) view: Option<ParagraphView>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CaretAffinity {
+    Upstream,
+    Downstream,
+}
+
 #[derive(Default)]
 pub(super) struct State {
     pub(super) paragraphs: Vec<LaidOutParagraph>,
@@ -26,6 +32,7 @@ pub(super) struct State {
     pub(super) content_height: f32,
     pub(super) observed_selection: Option<TextSelection>,
     pub(super) observed_viewport: Option<Size>,
+    pub(super) caret_hint: Option<(Position, CaretAffinity)>,
 }
 
 impl Focusable for State {
@@ -40,10 +47,38 @@ impl Focusable for State {
     fn unfocus(&mut self) {
         self.is_focused = false;
         self.drag_anchor = None;
+        self.caret_hint = None;
     }
 }
 impl State {
-    pub(super) fn hit_test(&self, position: Point) -> Option<Position> {
+    pub(super) fn hit_test(&mut self, point: Point) -> Option<Position> {
+        let position = self.hit_test_position(point)?;
+
+        let affinity = self.paragraphs.iter().find_map(|item| {
+            let mut candidates = item.caret_candidates(position);
+
+            let upstream = candidates.next()?;
+            let downstream = candidates.last().unwrap_or(upstream);
+
+            let upstream_center = upstream.y + upstream.height * 0.5;
+            let downstream_center = downstream.y + downstream.height * 0.5;
+
+            let upstream_distance = (point.y - upstream_center).abs();
+            let downstream_distance = (point.y - downstream_center).abs();
+
+            Some(if upstream_distance < downstream_distance {
+                CaretAffinity::Upstream
+            } else {
+                CaretAffinity::Downstream
+            })
+        })?;
+
+        self.caret_hint = Some((position, affinity));
+
+        Some(position)
+    }
+
+    fn hit_test_position(&self, position: Point) -> Option<Position> {
         if self.has_error {
             return None;
         }
@@ -77,9 +112,16 @@ impl State {
             return None;
         }
 
-        self.paragraphs
-            .iter()
-            .find_map(|item| item.caret_bounds(position))
+        let affinity = self
+            .caret_hint
+            .filter(|(hint_position, _)| *hint_position == position)
+            .map(|(_, affinity)| affinity)
+            .unwrap_or(CaretAffinity::Downstream);
+
+        self.paragraphs.iter().find_map(|item| match affinity {
+            CaretAffinity::Upstream => item.caret_candidates(position).next(),
+            CaretAffinity::Downstream => item.caret_bounds(position),
+        })
     }
 
     pub(super) fn selection_bounds(&self, selection: TextSelection) -> Vec<Rectangle> {
@@ -401,5 +443,31 @@ mod tests {
         assert!(upstream.x > downstream.x);
 
         assert_eq!(item.caret_bounds(position), Some(*downstream));
+
+        let upstream = *upstream;
+        let downstream = *downstream;
+
+        let mut state = State {
+            paragraphs: vec![item],
+            ..State::default()
+        };
+
+        assert_eq!(state.caret_bounds(position), Some(downstream));
+
+        state.caret_hint = Some((position, super::CaretAffinity::Upstream));
+
+        assert_eq!(state.caret_bounds(position), Some(upstream));
+
+        state.caret_hint = Some((position, super::CaretAffinity::Downstream));
+
+        assert_eq!(state.caret_bounds(position), Some(downstream));
+
+        // A hint for another position must not affect this caret.
+        state.caret_hint = Some((
+            Position::from_utf16_offset(start),
+            super::CaretAffinity::Upstream,
+        ));
+
+        assert_eq!(state.caret_bounds(position), Some(downstream));
     }
 }

@@ -241,7 +241,13 @@ where
         let selection_changed = state.observed_selection != Some(selection);
 
         let viewport_changed = state.observed_viewport != Some(size);
+        let hint_matches_head = state
+            .caret_hint
+            .is_some_and(|(position, _)| position == selection.head());
 
+        if content_changed || viewport_changed || (selection_changed && !hint_matches_head) {
+            state.caret_hint = None;
+        }
         let mut previous = std::mem::take(&mut state.paragraphs).into_iter();
 
         state.has_error = false;
@@ -487,6 +493,7 @@ where
             Event::Window(window::Event::Unfocused) => {
                 state.window_unfocused = true;
                 state.drag_anchor = None;
+                state.caret_hint = None;
                 shell.request_redraw();
             }
             Event::Window(window::Event::Focused) => {
@@ -528,7 +535,7 @@ where
 
                 if let Some(position) = state.hit_test(local) {
                     state.drag_anchor = Some(position);
-
+                    shell.request_redraw();
                     shell.publish(on_action(EditorAction::SetSelection(
                         TextSelection::cursor(position),
                     )));
@@ -570,7 +577,7 @@ where
 
                 if let Some(head) = state.hit_test(local) {
                     let selection = TextSelection::new(anchor, head);
-
+                    shell.request_redraw();
                     if selection != self.editor.selection() {
                         shell.publish(on_action(EditorAction::SetSelection(selection)));
                     }
@@ -655,6 +662,7 @@ where
                         Ok(text) => {
                             clipboard.write(clipboard::Kind::Standard, text);
 
+                            state.caret_hint = None;
                             if is_cut && let Some(on_action) = &self.on_action {
                                 state.drag_anchor = None;
                                 shell.publish(on_action(EditorAction::DeleteSelection));
@@ -678,6 +686,7 @@ where
                         && !text.is_empty()
                     {
                         state.drag_anchor = None;
+                        state.caret_hint = None;
                         shell.publish(on_action(EditorAction::PasteText(text)));
                     }
 
@@ -689,6 +698,7 @@ where
                     keyboard_action(key, *physical_key, *modifiers, text.as_deref())
                 {
                     state.drag_anchor = None;
+                    state.caret_hint = None;
                     shell.publish(on_action(action));
                     shell.capture_event();
                 }
