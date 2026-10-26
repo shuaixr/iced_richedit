@@ -1,4 +1,7 @@
-use crate::document::{ParagraphView, Position, TextPosition, TextSelection};
+use crate::{
+    document::{ParagraphView, Position, TextPosition, TextSelection},
+    widget::ime::ImeState,
+};
 
 use iced::{
     Point, Rectangle, Size,
@@ -21,6 +24,11 @@ pub(super) enum CaretAffinity {
     Downstream,
 }
 
+pub(super) struct ObservedPreedit {
+    pub(super) content: String,
+    pub(super) selection: Option<std::ops::Range<usize>>,
+}
+
 #[derive(Default)]
 pub(super) struct State {
     pub(super) paragraphs: Vec<LaidOutParagraph>,
@@ -33,8 +41,9 @@ pub(super) struct State {
     pub(super) observed_selection: Option<TextSelection>,
     pub(super) observed_viewport: Option<Size>,
     pub(super) caret_hint: Option<(Position, CaretAffinity)>,
-
+    pub(super) ime: ImeState,
     pub(super) preferred_x: Option<f32>,
+    pub(super) observed_preedit: Option<ObservedPreedit>,
 }
 
 impl Focusable for State {
@@ -51,6 +60,7 @@ impl Focusable for State {
         self.drag_anchor = None;
         self.caret_hint = None;
         self.preferred_x = None;
+        self.ime.cancel();
     }
 }
 impl State {
@@ -269,6 +279,36 @@ impl State {
 
         target.map(|(position, affinity, _)| (position, affinity))
     }
+
+    pub(super) fn composition_bounds(&self) -> Vec<Rectangle> {
+        if self.has_error {
+            return Vec::new();
+        }
+
+        self.paragraphs
+            .iter()
+            .flat_map(|item| item.composition_bounds())
+            .collect()
+    }
+
+    pub(super) fn composition_selection_bounds(&self) -> Vec<Rectangle> {
+        if self.has_error {
+            return Vec::new();
+        }
+
+        let Some(selection) = self.ime.preedit().and_then(|preedit| preedit.selection) else {
+            return Vec::new();
+        };
+
+        if selection.is_empty() {
+            return Vec::new();
+        }
+
+        self.paragraphs
+            .iter()
+            .flat_map(|item| item.composition_selection_bounds(&selection))
+            .collect()
+    }
 }
 
 impl LaidOutParagraph {
@@ -380,24 +420,9 @@ impl LaidOutParagraph {
             return Vec::new();
         };
 
-        let cursor_from = Cursor::new(text_from.line, text_from.byte);
-        let cursor_to = Cursor::new(text_to.line, text_to.byte);
-
-        let mut rectangles = Vec::new();
+        let mut rectangles = self.text_range_bounds(text_from, text_to);
 
         for run in self.paragraph.buffer().layout_runs() {
-            if from < to
-                && let Some((x, width)) = run.highlight(cursor_from, cursor_to)
-                && width > 0.0
-            {
-                rectangles.push(Rectangle {
-                    x: self.origin.x + x,
-                    y: self.origin.y + run.line_top,
-                    width,
-                    height: run.line_height,
-                });
-            }
-
             let Some(line) = view.line_text(run.line_i) else {
                 continue;
             };
@@ -471,6 +496,54 @@ impl LaidOutParagraph {
                     })
             })
         })
+    }
+
+    fn text_range_bounds(&self, from: TextPosition, to: TextPosition) -> Vec<Rectangle> {
+        if from == to {
+            return Vec::new();
+        }
+
+        let cursor_from = Cursor::new(from.line, from.byte);
+        let cursor_to = Cursor::new(to.line, to.byte);
+
+        self.paragraph
+            .buffer()
+            .layout_runs()
+            .filter_map(|run| {
+                let (x, width) = run.highlight(cursor_from, cursor_to)?;
+
+                (width > 0.0).then_some(Rectangle {
+                    x: self.origin.x + x,
+                    y: self.origin.y + run.line_top,
+                    width,
+                    height: run.line_height,
+                })
+            })
+            .collect()
+    }
+
+    fn composition_bounds(&self) -> Vec<Rectangle> {
+        let Some((from, to)) = self
+            .view
+            .as_ref()
+            .and_then(|view| view.composition_text_range())
+        else {
+            return Vec::new();
+        };
+
+        self.text_range_bounds(from, to)
+    }
+
+    fn composition_selection_bounds(&self, selection: &std::ops::Range<usize>) -> Vec<Rectangle> {
+        let Some((from, to)) = self
+            .view
+            .as_ref()
+            .and_then(|view| view.composition_selection_range(selection))
+        else {
+            return Vec::new();
+        };
+
+        self.text_range_bounds(from, to)
     }
 }
 

@@ -19,7 +19,7 @@ Use `cargo check` for fast compilation checks, `cargo test` for the test suite, 
 
 Use stable `rustfmt` and Clippy. Follow Rust naming conventions: `snake_case` modules and functions, `CamelCase` types and traits, and `SCREAMING_SNAKE_CASE` constants. Choose descriptive identifiers.
 
-Do not add speculative fallback paths, duplicate logic, redundant state, or compatibility layers without a demonstrated requirement. Maintain one clear source of truth and remove obsolete branches when behavior changes. All repository content—including code, identifiers, comments, documentation, configuration descriptions, commit messages, and pull request text—must be in English.
+Do not add speculative fallback paths, duplicate logic, redundant state, or compatibility layers without a demonstrated requirement. Maintain one clear source of truth and remove obsolete branches when behavior changes. Repository content—including code, identifiers, comments, public documentation, configuration descriptions, commit messages, and pull request text—must be in English. Internal development guides, implementation tutorials, and review notes may use the language established by the current conversation; code examples and identifiers must remain in English.
 
 ## Testing Guidelines
 
@@ -35,4 +35,4 @@ No Git history currently establishes a commit convention. Use concise, imperativ
 
 Never commit secrets or local environment files. Provide sanitized examples such as `.env.example` and pin dependencies with the ecosystem lockfile.
 
-Agents must communicate in the language established by the current conversation, while keeping repository content in English. Treat this file as living policy: add durable constraints when they emerge, and periodically consolidate or remove obsolete guidance to keep it concise and authoritative.
+Agents must communicate in the language established by the current conversation and follow the repository language requirements and internal-documentation exception above. Treat this file as living policy: add durable constraints when they emerge, and periodically consolidate or remove obsolete guidance to keep it concise and authoritative.

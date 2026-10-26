@@ -1,10 +1,12 @@
+mod ime;
 mod state;
 
 use iced::{
     Border, Color, Element, Event, Font, Length, Pixels, Point, Rectangle, Size,
     advanced::{
-        Clipboard, Layout, Shell, Widget, clipboard,
+        Clipboard, InputMethod, Layout, Shell, Widget, clipboard,
         graphics::text::Paragraph,
+        input_method::{self, Purpose},
         layout, mouse, renderer, text,
         widget::{Operation, Tree, tree},
     },
@@ -18,6 +20,7 @@ use iced::advanced::text::Paragraph as _;
 use crate::{
     document::TextSelection,
     editor::{EditorAction, EditorState},
+    widget::state::ObservedPreedit,
 };
 
 use self::state::{LaidOutParagraph, State};
@@ -260,10 +263,17 @@ where
         let size = limits.resolve(self.width, self.height, Size::new(300.0, 300.0));
 
         let state = tree.state.downcast_mut::<State>();
-
+        state.ime.synchronize(self.editor);
         let selection = self.editor.selection();
-        let views = self.editor.document().paragraph_views();
 
+        let views = match state.ime.preedit() {
+            Some(preedit) => self.editor.document().composition_paragraph_views(
+                selection,
+                preedit.content,
+                preedit.selection.as_ref().map(|range| range.end),
+            ),
+            None => self.editor.document().paragraph_views(),
+        };
         // Compare against the old projection before taking the layout entries.
         let content_changed = match &views {
             Ok(views) => {
@@ -279,7 +289,14 @@ where
         };
 
         let selection_changed = state.observed_selection != Some(selection);
-
+        let preedit_changed = match (state.ime.preedit(), state.observed_preedit.as_ref()) {
+            (None, None) => false,
+            (Some(current), Some(previous)) => {
+                current.content != previous.content.as_str()
+                    || current.selection.as_ref() != previous.selection.as_ref()
+            }
+            _ => true,
+        };
         let viewport_changed = state.observed_viewport != Some(size);
         let hint_matches_head = state
             .caret_hint
@@ -372,8 +389,16 @@ where
 
         state.clamp_scroll(size.height);
 
-        if !state.has_error && (content_changed || selection_changed || viewport_changed) {
+        if !state.has_error
+            && (content_changed || selection_changed || viewport_changed || preedit_changed)
+        {
             state.reveal_head(selection.head(), size.height, PADDING);
+        }
+        if preedit_changed {
+            state.observed_preedit = state.ime.preedit().map(|preedit| ObservedPreedit {
+                content: preedit.content.to_owned(),
+                selection: preedit.selection,
+            });
         }
 
         state.observed_selection = Some(selection);
@@ -449,7 +474,13 @@ where
                 ..palette.primary
             };
 
-            for rectangle in state.selection_bounds(selection) {
+            let selection_bounds = if state.ime.preedit().is_some() {
+                state.composition_selection_bounds()
+            } else {
+                state.selection_bounds(selection)
+            };
+
+            for rectangle in selection_bounds {
                 let bounds = Rectangle {
                     x: bounds.x + rectangle.x,
                     y: bounds.y + rectangle.y - state.scroll_y,
@@ -475,11 +506,37 @@ where
 
                 renderer.fill_paragraph(&item.paragraph, position, color, text_clip);
             }
+            if state.is_focused && !state.window_unfocused && state.ime.preedit().is_some() {
+                for rectangle in state.composition_bounds() {
+                    let thickness = rectangle.height.min(1.0);
+
+                    let underline = Rectangle {
+                        x: bounds.x + rectangle.x,
+                        y: bounds.y + rectangle.y + rectangle.height - state.scroll_y - thickness,
+                        width: rectangle.width,
+                        height: thickness,
+                    };
+
+                    if let Some(underline) = underline.intersection(&text_clip) {
+                        renderer.fill_quad(
+                            renderer::Quad {
+                                bounds: underline,
+                                ..renderer::Quad::default()
+                            },
+                            palette.text,
+                        );
+                    }
+                }
+            }
             let selection = self.editor.selection();
 
             if state.is_focused
                 && !state.window_unfocused
                 && !state.has_error
+                && state
+                    .ime
+                    .preedit()
+                    .is_none_or(|preedit| preedit.selection.is_some())
                 && let Some(caret) = state.caret_bounds(selection.head())
             {
                 let caret = Rectangle {
@@ -529,13 +586,15 @@ where
         viewport: &Rectangle,
     ) {
         let state = tree.state.downcast_mut::<State>();
-
+        state.ime.synchronize(self.editor);
         match event {
             Event::Window(window::Event::Unfocused) => {
                 state.window_unfocused = true;
                 state.preferred_x = None;
                 state.drag_anchor = None;
                 state.caret_hint = None;
+                state.ime.cancel();
+                shell.invalidate_layout();
                 shell.request_redraw();
             }
             Event::Window(window::Event::Focused) => {
@@ -543,6 +602,8 @@ where
                 shell.request_redraw();
             }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                state.ime.cancel();
+                shell.invalidate_layout();
                 state.drag_anchor = None;
 
                 let bounds = layout.bounds();
@@ -680,6 +741,13 @@ where
                     return;
                 }
 
+                if matches!(key, keyboard::Key::Named(keyboard::key::Named::Process))
+                    || state.ime.blocks_keyboard()
+                {
+                    shell.capture_event();
+                    return;
+                }
+
                 let clipboard_shortcut =
                     if modifiers.command() && !modifiers.alt() && !modifiers.shift() {
                         key.to_latin(*physical_key)
@@ -806,6 +874,71 @@ where
                     shell.publish(on_action(action));
                     shell.capture_event();
                 }
+            }
+            Event::Window(window::Event::RedrawRequested(_)) => {
+                let input_method = if state.is_focused
+                    && !state.window_unfocused
+                    && !state.has_error
+                    && self.on_action.is_some()
+                {
+                    state
+                        .caret_bounds(self.editor.selection().head())
+                        .map(|caret| {
+                            let bounds = layout.bounds();
+
+                            InputMethod::Enabled {
+                                cursor: Rectangle {
+                                    x: bounds.x + caret.x,
+                                    y: bounds.y + caret.y - state.scroll_y,
+                                    width: caret.width,
+                                    height: caret.height,
+                                },
+                                purpose: Purpose::Normal,
+                                preedit: None::<input_method::Preedit<&str>>,
+                            }
+                        })
+                        .unwrap_or(InputMethod::Disabled)
+                } else {
+                    InputMethod::Disabled
+                };
+
+                shell.request_input_method(&input_method);
+            }
+            Event::InputMethod(event) => {
+                if !state.is_focused
+                    || state.window_unfocused
+                    || state.has_error
+                    || shell.is_event_captured()
+                {
+                    state.ime.cancel();
+
+                    if matches!(event, input_method::Event::Closed) {
+                        state.ime.close();
+                    }
+
+                    shell.invalidate_layout();
+                    shell.request_redraw();
+                    return;
+                }
+
+                let Some(on_action) = &self.on_action else {
+                    state.ime.cancel();
+                    shell.invalidate_layout();
+                    shell.request_redraw();
+                    return;
+                };
+
+                if let Some(action) = state.ime.handle(event, self.editor) {
+                    state.drag_anchor = None;
+                    state.caret_hint = None;
+                    state.preferred_x = None;
+
+                    shell.publish(on_action(action));
+                }
+
+                shell.capture_event();
+                shell.invalidate_layout();
+                shell.request_redraw();
             }
             _ => {}
         }

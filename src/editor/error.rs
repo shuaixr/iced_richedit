@@ -3,6 +3,7 @@ use crate::document::DocumentError;
 #[derive(Debug)]
 pub enum EditorError {
     Document(DocumentError),
+    StaleComposition,
 }
 
 impl std::fmt::Display for EditorError {
@@ -11,6 +12,7 @@ impl std::fmt::Display for EditorError {
             Self::Document(error) => {
                 write!(f, "editor document error: {error}")
             }
+            Self::StaleComposition => f.write_str("composition context is no longer valid"),
         }
     }
 }
@@ -19,6 +21,7 @@ impl std::error::Error for EditorError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Document(error) => Some(error),
+            Self::StaleComposition => None,
         }
     }
 }

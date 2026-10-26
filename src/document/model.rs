@@ -535,6 +535,46 @@ impl Document {
             )))
         })
     }
+
+    pub(crate) fn composition_paragraph_views(
+        &self,
+        selection: TextSelection,
+        preedit: &str,
+        cursor_byte: Option<usize>,
+    ) -> Result<Vec<ParagraphView>, DocumentError> {
+        self.validate_selection(selection)?;
+
+        let mut views = self.paragraph_views()?;
+
+        let contains = |view: &ParagraphView, position: Position| {
+            let start = view.start().utf16_offset();
+            let end = start + view.text().encode_utf16().count();
+            let offset = position.utf16_offset();
+
+            start <= offset && offset <= end
+        };
+
+        let first = views
+            .iter()
+            .position(|view| contains(view, selection.from()))
+            .ok_or_else(|| {
+                DocumentError::InvalidDocument("composition start paragraph is missing".to_owned())
+            })?;
+
+        let last = views
+            .iter()
+            .position(|view| contains(view, selection.to()))
+            .ok_or_else(|| {
+                DocumentError::InvalidDocument("composition end paragraph is missing".to_owned())
+            })?;
+
+        let composed =
+            ParagraphView::compose(&views[first], &views[last], selection, preedit, cursor_byte)?;
+
+        views.splice(first..=last, std::iter::once(composed));
+
+        Ok(views)
+    }
 }
 
 #[cfg(test)]

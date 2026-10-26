@@ -2,6 +2,8 @@ use std::ops::Range;
 
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::document::{DocumentError, TextSelection};
+
 use super::Position;
 
 /// A renderer-independent position within a paragraph.
@@ -11,18 +13,32 @@ pub(crate) struct TextPosition {
     pub(crate) byte: usize,
 }
 
+struct CompositionMap {
+    points: Vec<(usize, Position)>,
+    preedit: Range<usize>,
+    replacement_start: Position,
+    head: Position,
+    cursor_byte: usize,
+}
+
 /// A read-only text projection of one document paragraph.
 pub(crate) struct ParagraphView {
     start: Position,
     text: String,
     lines: Vec<Range<usize>>,
+    composition: Option<CompositionMap>,
 }
 
 impl ParagraphView {
     pub(super) fn new(start: Position, text: String) -> Self {
         let lines = logical_lines(&text);
 
-        Self { start, text, lines }
+        Self {
+            start,
+            text,
+            lines,
+            composition: None,
+        }
     }
 
     pub(crate) fn start(&self) -> Position {
@@ -42,30 +58,29 @@ impl ParagraphView {
         self.text.get(range.clone())
     }
 
-    /// Converts a valid document grapheme boundary to a logical text position.
+    /// Maps an original document position into the current text projection.
     ///
-    /// Positions inside a line separator are canonicalized to the next line.
+    /// During composition, the active head maps to the IME cursor.
     pub(crate) fn text_position(&self, position: Position) -> Option<TextPosition> {
-        let local = position
-            .utf16_offset()
-            .checked_sub(self.start.utf16_offset())?;
-
-        let byte = self.byte_at_utf16_boundary(local)?;
-
-        for (line, range) in self.lines.iter().enumerate() {
-            if byte < range.start {
-                return Some(TextPosition { line, byte: 0 });
+        let byte = if let Some(composition) = &self.composition {
+            if position == composition.head {
+                composition.cursor_byte
+            } else {
+                composition
+                    .points
+                    .iter()
+                    .find(|(_, original)| *original == position)
+                    .map(|(byte, _)| *byte)?
             }
+        } else {
+            let local = position
+                .utf16_offset()
+                .checked_sub(self.start.utf16_offset())?;
 
-            if byte <= range.end {
-                return Some(TextPosition {
-                    line,
-                    byte: byte - range.start,
-                });
-            }
-        }
+            self.byte_at_utf16_boundary(local)?
+        };
 
-        None
+        self.display_text_position(byte)
     }
 
     /// Converts a logical UTF-8 position to a document grapheme boundary.
@@ -83,6 +98,20 @@ impl ParagraphView {
 
         if !self.text.is_char_boundary(byte) {
             return None;
+        }
+
+        if let Some(composition) = &self.composition {
+            if composition.preedit.contains(&byte) {
+                return Some(composition.replacement_start);
+            }
+
+            let snapped = self.snap_byte_forward(byte)?;
+
+            return composition
+                .points
+                .iter()
+                .find(|(display_byte, _)| *display_byte >= snapped)
+                .map(|(_, original)| *original);
         }
 
         let snapped = self.snap_byte_forward(byte)?;
@@ -130,6 +159,160 @@ impl ParagraphView {
 
         None
     }
+
+    pub(super) fn compose(
+        first: &Self,
+        last: &Self,
+        selection: TextSelection,
+        preedit: &str,
+        cursor_byte: Option<usize>,
+    ) -> Result<Self, DocumentError> {
+        let invalid_position = || {
+            DocumentError::InvalidDocument(
+                "composition replacement range does not match its projection".to_owned(),
+            )
+        };
+
+        let from = selection
+            .from()
+            .utf16_offset()
+            .checked_sub(first.start.utf16_offset())
+            .ok_or_else(invalid_position)?;
+
+        let to = selection
+            .to()
+            .utf16_offset()
+            .checked_sub(last.start.utf16_offset())
+            .ok_or_else(invalid_position)?;
+
+        let prefix_end = first
+            .byte_at_utf16_boundary(from)
+            .ok_or_else(invalid_position)?;
+
+        let suffix_start = last
+            .byte_at_utf16_boundary(to)
+            .ok_or_else(invalid_position)?;
+
+        let cursor_byte = cursor_byte.unwrap_or(0);
+
+        if cursor_byte > preedit.len() || !preedit.is_char_boundary(cursor_byte) {
+            return Err(DocumentError::InvalidDocument(
+                "composition cursor is not a valid UTF-8 boundary".to_owned(),
+            ));
+        }
+
+        let prefix = &first.text[..prefix_end];
+        let suffix = &last.text[suffix_start..];
+
+        let mut text = String::with_capacity(prefix.len() + preedit.len() + suffix.len());
+
+        text.push_str(prefix);
+        text.push_str(preedit);
+        text.push_str(suffix);
+
+        let preedit_range = prefix.len()..prefix.len() + preedit.len();
+
+        let mut points = Vec::new();
+
+        for (byte, utf16) in text_boundaries(&first.text) {
+            if byte > prefix_end {
+                break;
+            }
+
+            points.push((
+                byte,
+                Position::from_utf16_offset(first.start.utf16_offset() + utf16),
+            ));
+        }
+
+        for (byte, utf16) in text_boundaries(&last.text) {
+            if byte < suffix_start {
+                continue;
+            }
+
+            points.push((
+                preedit_range.end + byte - suffix_start,
+                Position::from_utf16_offset(last.start.utf16_offset() + utf16),
+            ));
+        }
+
+        let lines = logical_lines(&text);
+
+        Ok(Self {
+            start: first.start,
+            text,
+            lines,
+            composition: Some(CompositionMap {
+                points,
+                preedit: preedit_range,
+                replacement_start: selection.from(),
+                head: selection.head(),
+                cursor_byte: prefix.len() + cursor_byte,
+            }),
+        })
+    }
+
+    fn display_text_position(&self, byte: usize) -> Option<TextPosition> {
+        if byte > self.text.len() || !self.text.is_char_boundary(byte) {
+            return None;
+        }
+
+        for (line, range) in self.lines.iter().enumerate() {
+            if byte < range.start {
+                return Some(TextPosition { line, byte: 0 });
+            }
+
+            if byte <= range.end {
+                return Some(TextPosition {
+                    line,
+                    byte: byte - range.start,
+                });
+            }
+        }
+
+        None
+    }
+
+    /// Returns the temporary composition range in displayed text coordinates.
+    pub(crate) fn composition_text_range(&self) -> Option<(TextPosition, TextPosition)> {
+        let composition = self.composition.as_ref()?;
+        let length = composition.preedit.len();
+
+        self.composition_selection_range(&(0..length))
+    }
+
+    /// Maps a preedit-local UTF-8 range into displayed text coordinates.
+    pub(crate) fn composition_selection_range(
+        &self,
+        selection: &Range<usize>,
+    ) -> Option<(TextPosition, TextPosition)> {
+        let composition = self.composition.as_ref()?;
+
+        if selection.start >= selection.end || selection.end > composition.preedit.len() {
+            return None;
+        }
+
+        let from = composition.preedit.start.checked_add(selection.start)?;
+
+        let to = composition.preedit.start.checked_add(selection.end)?;
+
+        Some((
+            self.display_text_position(from)?,
+            self.display_text_position(to)?,
+        ))
+    }
+}
+
+fn text_boundaries(text: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
+    std::iter::once((0, 0)).chain(
+        text.graphemes(true)
+            .scan((0, 0), |(byte, utf16), grapheme| {
+                *byte += grapheme.len();
+                *utf16 += grapheme.encode_utf16().count();
+
+                Some((*byte, *utf16))
+            }),
+    )
 }
 
 /// Mirrors cosmic-text 0.15's CR/LF separator recognition.

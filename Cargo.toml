@@ -19,3 +19,7 @@ example-basic = ["iced/tiny-skia", "iced/fira-sans"]
 [[example]]
 name = "basic"
 required-features = ["example-basic"]
+
+[[example]]
+name = "ime_probe"
+required-features = ["example-basic"]

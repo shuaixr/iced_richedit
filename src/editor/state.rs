@@ -3,7 +3,7 @@ use std::time::Instant;
 use crate::{
     document::{Document, Mark, Position, TextSelection, TransactionResult},
     editor::{
-        EditorAction,
+        CompositionContext, EditorAction,
         error::EditorError,
         history::{History, HistoryEntry},
     },
@@ -14,6 +14,7 @@ pub struct EditorState {
     selection: TextSelection,
     stored_marks: Option<Vec<Mark>>,
     history: History,
+    composition_context: CompositionContext,
 }
 impl EditorState {
     pub fn new(document: Document) -> Result<Self, EditorError> {
@@ -26,6 +27,7 @@ impl EditorState {
             selection,
             stored_marks: None,
             history: History::default(),
+            composition_context: CompositionContext::new(),
         })
     }
     pub fn document(&self) -> &Document {
@@ -42,6 +44,7 @@ impl EditorState {
         self.history.close_input_group();
         self.selection = selection;
         self.stored_marks = None;
+        self.invalidate_composition_context();
         Ok(())
     }
     pub fn stored_marks(&self) -> Option<&[Mark]> {
@@ -90,7 +93,7 @@ impl EditorState {
         self.document = document;
         self.selection = selection;
         self.stored_marks = stored_marks;
-
+        self.invalidate_composition_context();
         Ok(())
     }
 
@@ -207,7 +210,7 @@ impl EditorState {
             .map_err(EditorError::Document)?;
         self.history.close_input_group();
         self.stored_marks = Some(marks);
-
+        self.invalidate_composition_context();
         Ok(())
     }
 
@@ -231,6 +234,7 @@ impl EditorState {
                 .map_err(EditorError::Document)?;
             self.history.close_input_group();
             self.stored_marks = Some(marks);
+            self.invalidate_composition_context();
             return Ok(());
         }
 
@@ -263,6 +267,7 @@ impl EditorState {
 
             self.history.close_input_group();
             self.stored_marks = Some(marks);
+            self.invalidate_composition_context();
             return Ok(());
         }
 
@@ -300,6 +305,8 @@ impl EditorState {
     pub fn undo(&mut self) -> Result<(), EditorError> {
         let Some(entry) = self.history.undo_entry() else {
             self.history.close_input_group();
+
+            self.invalidate_composition_context();
             return Ok(());
         };
 
@@ -321,6 +328,7 @@ impl EditorState {
         self.document = document;
         self.selection = selection;
         self.stored_marks = stored_marks;
+        self.invalidate_composition_context();
 
         Ok(())
     }
@@ -328,6 +336,7 @@ impl EditorState {
     pub fn redo(&mut self) -> Result<(), EditorError> {
         let Some(entry) = self.history.redo_entry() else {
             self.history.close_input_group();
+            self.invalidate_composition_context();
             return Ok(());
         };
 
@@ -349,6 +358,7 @@ impl EditorState {
         self.document = document;
         self.selection = selection;
         self.stored_marks = stored_marks;
+        self.invalidate_composition_context();
 
         Ok(())
     }
@@ -522,8 +532,12 @@ impl EditorState {
 
     pub fn apply(&mut self, action: EditorAction) -> Result<(), EditorError> {
         match action {
+            EditorAction::CommitCompositionInContext { context, text } => {
+                self.commit_composition_in_context(&context, &text)
+            }
             EditorAction::InsertText(text) => self.insert_text(&text),
             EditorAction::PasteText(text) => self.paste_text(&text),
+            EditorAction::CommitComposition(text) => self.commit_composition(&text),
             EditorAction::SetSelection(selection) => self.set_selection(selection),
             EditorAction::SplitParagraph => self.split_paragraph(),
             EditorAction::DeleteBackward => self.delete_backward(),
@@ -669,6 +683,47 @@ impl EditorState {
         };
 
         self.set_selection(selection)
+    }
+
+    /// Commits input method text as a separate history event.
+    ///
+    /// An empty commit preserves content, selection and stored marks,
+    /// but closes the input group and invalidates the composition context.
+    pub fn commit_composition(&mut self, text: &str) -> Result<(), EditorError> {
+        if text.is_empty() {
+            self.history.close_input_group();
+            self.invalidate_composition_context();
+            return Ok(());
+        }
+
+        self.paste_text(text)
+    }
+
+    /// Captures the current context for a future composition commit.
+    pub fn composition_context(&self) -> CompositionContext {
+        self.composition_context.clone()
+    }
+
+    fn invalidate_composition_context(&mut self) {
+        self.composition_context = CompositionContext::new();
+    }
+
+    /// Commits only if no context-invalidating operation has occurred.
+    pub fn commit_composition_in_context(
+        &mut self,
+        context: &CompositionContext,
+        text: &str,
+    ) -> Result<(), EditorError> {
+        if !self.is_composition_context_current(context) {
+            return Err(EditorError::StaleComposition);
+        }
+
+        self.commit_composition(text)
+    }
+
+    /// Returns whether a captured composition context is still current.
+    pub fn is_composition_context_current(&self, context: &CompositionContext) -> bool {
+        self.composition_context.matches(context)
     }
 }
 
@@ -2463,6 +2518,169 @@ mod tests {
             );
         }
 
+        assert!(!state.can_undo());
+    }
+
+    #[test]
+    fn empty_composition_commit_preserves_selected_content() {
+        let document = Document::from_json(
+            r#"{
+               "type": "doc",
+               "content": [{
+                   "type": "paragraph",
+                   "content": [{
+                       "type": "text",
+                       "text": "ABC"
+                   }]
+               }]
+           }"#,
+        )
+        .expect("document must be valid");
+
+        let mut state = EditorState::new(document).expect("state must be valid");
+
+        let selection = TextSelection::new(
+            Position::from_utf16_offset(2),
+            Position::from_utf16_offset(4),
+        );
+
+        state
+            .set_selection(selection)
+            .expect("selection must be valid");
+
+        let before = state.document().to_json().expect("document must serialize");
+
+        state
+            .apply(crate::editor::EditorAction::CommitComposition(String::new()))
+            .expect("empty commit must succeed");
+
+        assert_eq!(
+            state.document().to_json().expect("document must serialize"),
+            before
+        );
+        assert_eq!(state.selection(), selection);
+        assert!(!state.can_undo());
+    }
+
+    #[test]
+    fn composition_commit_replaces_selection_as_one_history_event() {
+        let document = Document::from_json(
+            r#"{
+               "type": "doc",
+               "content": [{
+                   "type": "paragraph",
+                   "content": [{
+                       "type": "text",
+                       "text": "ABC"
+                   }]
+               }]
+           }"#,
+        )
+        .expect("document must be valid");
+
+        let mut state = EditorState::new(document).expect("state must be valid");
+
+        let selection = TextSelection::new(
+            Position::from_utf16_offset(4),
+            Position::from_utf16_offset(2),
+        );
+
+        state
+            .set_selection(selection)
+            .expect("selection must be valid");
+
+        state
+            .apply(crate::editor::EditorAction::CommitComposition(
+                "你好".to_owned(),
+            ))
+            .expect("commit must succeed");
+
+        assert_eq!(state.document().text(), "A你好");
+        assert_eq!(
+            state.selection(),
+            TextSelection::cursor(Position::from_utf16_offset(4))
+        );
+
+        state.undo().expect("undo must succeed");
+
+        assert_eq!(state.document().text(), "ABC");
+        assert_eq!(state.selection(), selection);
+        assert!(!state.can_undo());
+
+        state.redo().expect("redo must succeed");
+
+        assert_eq!(state.document().text(), "A你好");
+        assert_eq!(
+            state.selection(),
+            TextSelection::cursor(Position::from_utf16_offset(4))
+        );
+    }
+
+    #[test]
+    fn composition_commit_separates_surrounding_input_history() {
+        let document = Document::empty().expect("document must be valid");
+        let mut state = EditorState::new(document).expect("state must be valid");
+
+        let now = Instant::now();
+
+        state.insert_text_at("A", now).expect("input must succeed");
+
+        state
+            .commit_composition("你好")
+            .expect("commit must succeed");
+
+        state
+            .insert_text_at("B", now + Duration::from_millis(1))
+            .expect("input must succeed");
+
+        assert_eq!(state.document().text(), "A你好B");
+
+        state.undo().expect("undo must succeed");
+        assert_eq!(state.document().text(), "A你好");
+
+        state.undo().expect("undo must succeed");
+        assert_eq!(state.document().text(), "A");
+
+        state.undo().expect("undo must succeed");
+        assert_eq!(state.document().text(), "");
+        assert!(!state.can_undo());
+    }
+
+    #[test]
+    fn empty_composition_commit_closes_input_group_and_preserves_marks() {
+        let document = Document::empty().expect("document must be valid");
+        let mut state = EditorState::new(document).expect("state must be valid");
+
+        state
+            .toggle_mark(Mark::Strong)
+            .expect("format change must succeed");
+
+        let now = Instant::now();
+
+        state.insert_text_at("A", now).expect("input must succeed");
+
+        let selection = state.selection();
+        let marks = state.stored_marks().map(|marks| marks.to_vec());
+
+        state
+            .commit_composition("")
+            .expect("empty commit must succeed");
+
+        assert_eq!(state.document().text(), "A");
+        assert_eq!(state.selection(), selection);
+        assert_eq!(state.stored_marks(), marks.as_deref());
+
+        state
+            .insert_text_at("B", now + Duration::from_millis(1))
+            .expect("input must succeed");
+
+        state.undo().expect("undo must succeed");
+
+        assert_eq!(state.document().text(), "A");
+
+        state.undo().expect("undo must succeed");
+
+        assert_eq!(state.document().text(), "");
         assert!(!state.can_undo());
     }
 }
