@@ -84,6 +84,32 @@ fn make_paragraph(content: &str, width: f32, font: Font) -> Paragraph {
     Paragraph::with_text(paragraph_text(content, width, font))
 }
 
+fn visual_line_boundary_key(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option<bool> {
+    use keyboard::key::Named;
+
+    if cfg!(target_os = "macos") {
+        if !modifiers.macos_command() || modifiers.control() || modifiers.alt() {
+            return None;
+        }
+
+        match key {
+            keyboard::Key::Named(Named::ArrowLeft) => Some(false),
+            keyboard::Key::Named(Named::ArrowRight) => Some(true),
+            _ => None,
+        }
+    } else {
+        if modifiers.control() || modifiers.alt() || modifiers.logo() {
+            return None;
+        }
+
+        match key {
+            keyboard::Key::Named(Named::Home) => Some(false),
+            keyboard::Key::Named(Named::End) => Some(true),
+            _ => None,
+        }
+    }
+}
+
 fn keyboard_action(
     key: &keyboard::Key,
     physical_key: keyboard::key::Physical,
@@ -680,6 +706,32 @@ where
                 let Some(on_action) = &self.on_action else {
                     return;
                 };
+
+                if let Some(end) = visual_line_boundary_key(key, *modifiers) {
+                    let selection = self.editor.selection();
+
+                    if let Some((position, affinity)) =
+                        state.visual_line_boundary(selection.head(), end)
+                    {
+                        let selection = if modifiers.shift() {
+                            TextSelection::new(selection.anchor(), position)
+                        } else {
+                            TextSelection::cursor(position)
+                        };
+
+                        state.drag_anchor = None;
+                        state.caret_hint = Some((position, affinity));
+
+                        // A visual-side change may leave the document position unchanged.
+                        state.reveal_head(position, layout.bounds().height, PADDING);
+
+                        shell.publish(on_action(EditorAction::SetSelection(selection)));
+                        shell.request_redraw();
+                    }
+
+                    shell.capture_event();
+                    return;
+                }
 
                 if clipboard_shortcut == Some('v') {
                     if let Some(text) = clipboard.read(clipboard::Kind::Standard)

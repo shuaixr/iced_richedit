@@ -183,7 +183,63 @@ impl State {
 
         self.clamp_scroll(viewport_height);
     }
+
+    pub(super) fn visual_line_boundary(
+        &self,
+        position: Position,
+        end: bool,
+    ) -> Option<(Position, CaretAffinity)> {
+        let current = self.caret_bounds(position)?;
+
+        let item = self.paragraphs.iter().find(|item| {
+            item.view
+                .as_ref()
+                .is_some_and(|view| view.text_position(position).is_some())
+        })?;
+
+        let view = item.view.as_ref()?;
+
+        let offsets =
+            std::iter::once(0).chain(view.text().graphemes(true).scan(0, |offset, grapheme| {
+                *offset += grapheme.encode_utf16().count();
+                Some(*offset)
+            }));
+
+        let mut target: Option<(Position, CaretAffinity)> = None;
+
+        for offset in offsets {
+            let candidate = Position::from_utf16_offset(view.start().utf16_offset() + offset);
+
+            for (index, bounds) in item.caret_candidates(candidate).enumerate() {
+                // Both rectangles come from the same layout geometry.
+                if bounds.y != current.y {
+                    continue;
+                }
+
+                let affinity = if index == 0 {
+                    CaretAffinity::Upstream
+                } else {
+                    CaretAffinity::Downstream
+                };
+
+                let replace = target.is_none_or(|(previous, _)| {
+                    if end {
+                        candidate > previous
+                    } else {
+                        candidate < previous
+                    }
+                });
+
+                if replace {
+                    target = Some((candidate, affinity));
+                }
+            }
+        }
+
+        target
+    }
 }
+
 impl LaidOutParagraph {
     fn caret_bounds(&self, position: Position) -> Option<Rectangle> {
         // Preserve the existing downstream preference at soft wraps.
@@ -469,5 +525,43 @@ mod tests {
         ));
 
         assert_eq!(state.caret_bounds(position), Some(downstream));
+
+        state.caret_hint = Some((position, super::CaretAffinity::Upstream));
+
+        let (end_position, end_affinity) = state
+            .visual_line_boundary(position, true)
+            .expect("visual line end must exist");
+
+        assert_eq!(end_position, position);
+
+        state.caret_hint = Some((end_position, end_affinity));
+
+        assert_eq!(state.caret_bounds(end_position), Some(upstream));
+
+        // Home on the downstream row must preserve its visual side.
+        state.caret_hint = Some((position, super::CaretAffinity::Downstream));
+
+        let (start_position, start_affinity) = state
+            .visual_line_boundary(position, false)
+            .expect("visual line start must exist");
+
+        assert_eq!(start_position, position);
+
+        state.caret_hint = Some((start_position, start_affinity));
+
+        assert_eq!(state.caret_bounds(start_position), Some(downstream));
+
+        // Traversing the row from Home to End must stay on that row.
+        let (row_end, row_end_affinity) = state
+            .visual_line_boundary(start_position, true)
+            .expect("visual line end must exist");
+
+        assert!(row_end > start_position);
+
+        state.caret_hint = Some((row_end, row_end_affinity));
+
+        let row_end_bounds = state.caret_bounds(row_end).expect("caret must exist");
+
+        assert_eq!(row_end_bounds.y, downstream.y);
     }
 }
