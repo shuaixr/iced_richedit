@@ -33,6 +33,8 @@ pub(super) struct State {
     pub(super) observed_selection: Option<TextSelection>,
     pub(super) observed_viewport: Option<Size>,
     pub(super) caret_hint: Option<(Position, CaretAffinity)>,
+
+    pub(super) preferred_x: Option<f32>,
 }
 
 impl Focusable for State {
@@ -48,6 +50,7 @@ impl Focusable for State {
         self.is_focused = false;
         self.drag_anchor = None;
         self.caret_hint = None;
+        self.preferred_x = None;
     }
 }
 impl State {
@@ -74,7 +77,7 @@ impl State {
         })?;
 
         self.caret_hint = Some((position, affinity));
-
+        self.preferred_x = None;
         Some(position)
     }
 
@@ -197,46 +200,74 @@ impl State {
                 .is_some_and(|view| view.text_position(position).is_some())
         })?;
 
-        let view = item.view.as_ref()?;
-
-        let offsets =
-            std::iter::once(0).chain(view.text().graphemes(true).scan(0, |offset, grapheme| {
-                *offset += grapheme.encode_utf16().count();
-                Some(*offset)
-            }));
-
         let mut target: Option<(Position, CaretAffinity)> = None;
 
-        for offset in offsets {
-            let candidate = Position::from_utf16_offset(view.start().utf16_offset() + offset);
+        for (candidate, affinity, bounds) in item.visual_carets() {
+            if bounds.y != current.y {
+                continue;
+            }
 
-            for (index, bounds) in item.caret_candidates(candidate).enumerate() {
-                // Both rectangles come from the same layout geometry.
-                if bounds.y != current.y {
-                    continue;
-                }
-
-                let affinity = if index == 0 {
-                    CaretAffinity::Upstream
+            let replace = target.is_none_or(|(previous, _)| {
+                if end {
+                    candidate > previous
                 } else {
-                    CaretAffinity::Downstream
-                };
-
-                let replace = target.is_none_or(|(previous, _)| {
-                    if end {
-                        candidate > previous
-                    } else {
-                        candidate < previous
-                    }
-                });
-
-                if replace {
-                    target = Some((candidate, affinity));
+                    candidate < previous
                 }
+            });
+
+            if replace {
+                target = Some((candidate, affinity));
             }
         }
 
         target
+    }
+
+    pub(super) fn vertical_target(
+        &self,
+        position: Position,
+        down: bool,
+        preferred_x: f32,
+    ) -> Option<(Position, CaretAffinity)> {
+        let current = self.caret_bounds(position)?;
+
+        let mut target: Option<(Position, CaretAffinity, Rectangle)> = None;
+
+        for (candidate, affinity, bounds) in
+            self.paragraphs.iter().flat_map(|item| item.visual_carets())
+        {
+            let in_direction = if down {
+                bounds.y > current.y
+            } else {
+                bounds.y < current.y
+            };
+
+            if !in_direction {
+                continue;
+            }
+
+            let replace = match target {
+                None => true,
+                Some((_, _, previous)) => {
+                    let nearer_row = if down {
+                        bounds.y < previous.y
+                    } else {
+                        bounds.y > previous.y
+                    };
+
+                    let nearer_x = bounds.y == previous.y
+                        && (bounds.x - preferred_x).abs() < (previous.x - preferred_x).abs();
+
+                    nearer_row || nearer_x
+                }
+            };
+
+            if replace {
+                target = Some((candidate, affinity, bounds));
+            }
+        }
+
+        target.map(|(position, affinity, _)| (position, affinity))
     }
 }
 
@@ -411,6 +442,36 @@ impl LaidOutParagraph {
 
         rectangles
     }
+
+    fn visual_carets(&self) -> impl Iterator<Item = (Position, CaretAffinity, Rectangle)> + '_ {
+        self.view.iter().flat_map(move |view| {
+            let start = view.start().utf16_offset();
+
+            let offsets = std::iter::once(0).chain(view.text().graphemes(true).scan(
+                0,
+                |offset, grapheme| {
+                    *offset += grapheme.encode_utf16().count();
+                    Some(*offset)
+                },
+            ));
+
+            offsets.flat_map(move |offset| {
+                let position = Position::from_utf16_offset(start + offset);
+
+                self.caret_candidates(position)
+                    .enumerate()
+                    .map(move |(index, bounds)| {
+                        let affinity = if index == 0 {
+                            CaretAffinity::Upstream
+                        } else {
+                            CaretAffinity::Downstream
+                        };
+
+                        (position, affinity, bounds)
+                    })
+            })
+        })
+    }
 }
 
 #[cfg(test)]
@@ -563,5 +624,100 @@ mod tests {
         let row_end_bounds = state.caret_bounds(row_end).expect("caret must exist");
 
         assert_eq!(row_end_bounds.y, downstream.y);
+    }
+
+    #[test]
+    fn vertical_navigation_preserves_horizontal_target_across_short_paragraph() {
+        use crate::document::{Document, Position};
+        use iced::{Font, Point};
+
+        use super::LaidOutParagraph;
+
+        let document = Document::from_json(
+            &serde_json::json!({
+                "type": "doc",
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": [{
+                            "type": "text",
+                            "text": "MMMMMMMM"
+                        }]
+                    },
+                    {
+                        "type": "paragraph",
+                        "content": [{
+                            "type": "text",
+                            "text": "x"
+                        }]
+                    },
+                    {
+                        "type": "paragraph",
+                        "content": [{
+                            "type": "text",
+                            "text": "MMMMMMMM"
+                        }]
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .expect("document must be valid");
+
+        let views = document.paragraph_views().expect("projection must succeed");
+
+        let mut state = State::default();
+
+        for (index, view) in views.into_iter().enumerate() {
+            let paragraph = super::super::make_paragraph(view.text(), 400.0, Font::DEFAULT);
+
+            state.paragraphs.push(LaidOutParagraph {
+                paragraph,
+                origin: Point::new(12.0, 12.0 + index as f32 * 40.0),
+                height: 24.0,
+                view: Some(view),
+            });
+        }
+
+        let initial = Position::from_utf16_offset(7);
+
+        let preferred_x = state
+            .caret_bounds(initial)
+            .expect("initial caret must exist")
+            .x;
+
+        let (middle, affinity) = state
+            .vertical_target(initial, true, preferred_x)
+            .expect("middle row must exist");
+
+        assert_eq!(middle, Position::from_utf16_offset(12));
+
+        state.caret_hint = Some((middle, affinity));
+
+        let (last, affinity) = state
+            .vertical_target(middle, true, preferred_x)
+            .expect("last row must exist");
+
+        assert_eq!(last, Position::from_utf16_offset(20));
+
+        state.caret_hint = Some((last, affinity));
+
+        let last_bounds = state.caret_bounds(last).expect("last caret must exist");
+
+        assert!((last_bounds.x - preferred_x).abs() < 0.01);
+
+        assert!(state.vertical_target(last, true, preferred_x).is_none());
+
+        let (middle, affinity) = state
+            .vertical_target(last, false, preferred_x)
+            .expect("middle row must exist");
+
+        state.caret_hint = Some((middle, affinity));
+
+        let (first, _) = state
+            .vertical_target(middle, false, preferred_x)
+            .expect("first row must exist");
+
+        assert_eq!(first, initial);
     }
 }

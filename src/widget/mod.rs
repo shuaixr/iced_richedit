@@ -110,6 +110,20 @@ fn visual_line_boundary_key(key: &keyboard::Key, modifiers: keyboard::Modifiers)
     }
 }
 
+fn vertical_navigation_key(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option<bool> {
+    use keyboard::key::Named;
+
+    if modifiers.control() || modifiers.alt() || modifiers.logo() {
+        return None;
+    }
+
+    match key {
+        keyboard::Key::Named(Named::ArrowUp) => Some(false),
+        keyboard::Key::Named(Named::ArrowDown) => Some(true),
+        _ => None,
+    }
+}
+
 fn keyboard_action(
     key: &keyboard::Key,
     physical_key: keyboard::key::Physical,
@@ -273,6 +287,7 @@ where
 
         if content_changed || viewport_changed || (selection_changed && !hint_matches_head) {
             state.caret_hint = None;
+            state.preferred_x = None;
         }
         let mut previous = std::mem::take(&mut state.paragraphs).into_iter();
 
@@ -518,6 +533,7 @@ where
         match event {
             Event::Window(window::Event::Unfocused) => {
                 state.window_unfocused = true;
+                state.preferred_x = None;
                 state.drag_anchor = None;
                 state.caret_hint = None;
                 shell.request_redraw();
@@ -688,9 +704,10 @@ where
                         Ok(text) => {
                             clipboard.write(clipboard::Kind::Standard, text);
 
-                            state.caret_hint = None;
                             if is_cut && let Some(on_action) = &self.on_action {
                                 state.drag_anchor = None;
+                                state.preferred_x = None;
+                                state.caret_hint = None;
                                 shell.publish(on_action(EditorAction::DeleteSelection));
                             }
                         }
@@ -707,6 +724,37 @@ where
                     return;
                 };
 
+                if let Some(down) = vertical_navigation_key(key, *modifiers) {
+                    let selection = self.editor.selection();
+
+                    let preferred_x = state
+                        .preferred_x
+                        .or_else(|| state.caret_bounds(selection.head()).map(|bounds| bounds.x));
+
+                    if let Some(preferred_x) = preferred_x
+                        && let Some((position, affinity)) =
+                            state.vertical_target(selection.head(), down, preferred_x)
+                    {
+                        let selection = if modifiers.shift() {
+                            TextSelection::new(selection.anchor(), position)
+                        } else {
+                            TextSelection::cursor(position)
+                        };
+
+                        state.drag_anchor = None;
+                        state.preferred_x = Some(preferred_x);
+                        state.caret_hint = Some((position, affinity));
+
+                        state.reveal_head(position, layout.bounds().height, PADDING);
+
+                        shell.publish(on_action(EditorAction::SetSelection(selection)));
+                        shell.request_redraw();
+                    }
+
+                    shell.capture_event();
+                    return;
+                }
+
                 if let Some(end) = visual_line_boundary_key(key, *modifiers) {
                     let selection = self.editor.selection();
 
@@ -720,6 +768,8 @@ where
                         };
 
                         state.drag_anchor = None;
+
+                        state.preferred_x = None;
                         state.caret_hint = Some((position, affinity));
 
                         // A visual-side change may leave the document position unchanged.
@@ -738,6 +788,7 @@ where
                         && !text.is_empty()
                     {
                         state.drag_anchor = None;
+                        state.preferred_x = None;
                         state.caret_hint = None;
                         shell.publish(on_action(EditorAction::PasteText(text)));
                     }
@@ -751,6 +802,7 @@ where
                 {
                     state.drag_anchor = None;
                     state.caret_hint = None;
+                    state.preferred_x = None;
                     shell.publish(on_action(action));
                     shell.capture_event();
                 }
