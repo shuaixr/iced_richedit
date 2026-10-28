@@ -21,6 +21,9 @@ enum Message {
     ToggleEmphasis,
     ToggleUnderline,
     ToggleCode,
+
+    SetLink,
+    RemoveLink,
 }
 
 impl Basic {
@@ -86,6 +89,35 @@ impl Basic {
                                 { "type": "code" },
                                 { "type": "strong" },
                                 { "type": "underline" }
+                            ]
+                        },
+                        {
+                            "type": "text",
+                            "text": "Link text. ",
+                            "marks": [
+                                {
+                                    "type": "link",
+                                    "attrs": {
+                                        "href": "https://iced.rs/",
+                                        "title": "iced"
+                                    }
+                                }
+                            ]
+                        },
+                        {
+                            "type": "text",
+                            "text": "Bold underlined code link. ",
+                            "marks": [
+                                { "type": "strong" },
+                                { "type": "underline" },
+                                { "type": "code" },
+                                {
+                                    "type": "link",
+                                    "attrs": {
+                                        "href": "https://iced.rs/",
+                                        "title": "iced"
+                                    }
+                                }
                             ]
                         },
                         {
@@ -160,6 +192,11 @@ impl Basic {
             Message::ToggleEmphasis => self.editor.toggle_mark(Mark::Emphasis),
             Message::ToggleUnderline => self.editor.toggle_mark(Mark::Underline),
             Message::ToggleCode => self.editor.toggle_mark(Mark::Code),
+
+            Message::SetLink => self
+                .editor
+                .set_link("https://iced.rs/".to_owned(), Some("iced".to_owned())),
+            Message::RemoveLink => self.editor.remove_link(),
         };
 
         self.error = result.err().map(|error| error.to_string());
@@ -195,6 +232,8 @@ impl Basic {
             button("Italic").on_press(Message::ToggleEmphasis),
             button("Underline").on_press(Message::ToggleUnderline),
             button("Code").on_press(Message::ToggleCode),
+            button("Set link").on_press(Message::SetLink),
+            button("Remove link").on_press(Message::RemoveLink),
         ]
         .spacing(8);
         let status = self.error.as_deref().unwrap_or(

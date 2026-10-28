@@ -106,14 +106,17 @@ impl ParagraphView {
         &self.text
     }
 
-    /// Returns continuous underline ranges in displayed text coordinates.
+    /// Returns ordinary underline ranges, excluding text styled as links.
     pub(crate) fn underline_text_ranges(&self) -> Vec<(TextPosition, TextPosition)> {
-        self.text_ranges_for_mark(&Mark::Underline)
+        self.text_ranges_matching(|marks| {
+            marks.contains(&Mark::Underline)
+                && !marks.iter().any(|mark| matches!(mark, Mark::Link { .. }))
+        })
     }
 
     /// Returns continuous inline-code ranges in displayed text coordinates.
     pub(crate) fn code_text_ranges(&self) -> Vec<(TextPosition, TextPosition)> {
-        self.text_ranges_for_mark(&Mark::Code)
+        self.text_ranges_matching(|marks| marks.contains(&Mark::Code))
     }
 
     /// Returns marked fragments without exposing projection storage.
@@ -123,12 +126,22 @@ impl ParagraphView {
             .map(|run| (&self.text[run.range.clone()], run.marks.as_slice()))
     }
 
+    /// Returns continuous link ranges in displayed text coordinates.
+    pub(crate) fn link_text_ranges(&self) -> Vec<(TextPosition, TextPosition)> {
+        self.text_ranges_matching(|marks| {
+            marks.iter().any(|mark| matches!(mark, Mark::Link { .. }))
+        })
+    }
+
     /// Returns continuous ranges carrying the given mark in display coordinates.
-    fn text_ranges_for_mark(&self, mark: &Mark) -> Vec<(TextPosition, TextPosition)> {
+    fn text_ranges_matching(
+        &self,
+        matches: impl Fn(&[Mark]) -> bool,
+    ) -> Vec<(TextPosition, TextPosition)> {
         let mut ranges: Vec<Range<usize>> = Vec::new();
 
         for run in &self.runs {
-            if !run.marks.contains(mark) || run.range.is_empty() {
+            if !matches(&run.marks) || run.range.is_empty() {
                 continue;
             }
 
@@ -671,5 +684,42 @@ mod tests {
 
         let plain = ParagraphView::new(Position::from_utf16_offset(1), "Plain text".to_owned());
         assert!(plain.code_text_ranges().is_empty());
+    }
+
+    #[test]
+    fn link_underlines_do_not_overlap_ordinary_underlines() {
+        use super::append_text_run;
+        use crate::document::Mark;
+
+        let link = Mark::Link {
+            href: "https://iced.rs/".to_owned(),
+            title: None,
+        };
+
+        let mut runs = Vec::new();
+
+        append_text_run(&mut runs, 0..1, &[Mark::Underline]);
+        append_text_run(&mut runs, 1..2, &[Mark::Underline, link.clone()]);
+        append_text_run(&mut runs, 2..3, &[Mark::Strong, link]);
+        append_text_run(&mut runs, 3..4, &[]);
+
+        let view =
+            ParagraphView::with_runs(Position::from_utf16_offset(1), "ABCD".to_owned(), runs);
+
+        assert_eq!(
+            view.underline_text_ranges(),
+            vec![(
+                TextPosition { line: 0, byte: 0 },
+                TextPosition { line: 0, byte: 1 },
+            )]
+        );
+
+        assert_eq!(
+            view.link_text_ranges(),
+            vec![(
+                TextPosition { line: 0, byte: 1 },
+                TextPosition { line: 0, byte: 3 },
+            )]
+        );
     }
 }

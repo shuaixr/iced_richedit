@@ -38,6 +38,7 @@ pub struct RichEdit<'a, Message> {
     height: Length,
     id: Option<Id>,
     on_action: Option<Box<dyn Fn(EditorAction) -> Message + 'a>>,
+    link_color: Color,
 }
 
 impl<'a, Message> RichEdit<'a, Message> {
@@ -48,6 +49,7 @@ impl<'a, Message> RichEdit<'a, Message> {
             height: Length::Fixed(300.0),
             id: None,
             on_action: None,
+            link_color: Color::from_rgb8(0, 102, 204),
         }
     }
 
@@ -68,6 +70,11 @@ impl<'a, Message> RichEdit<'a, Message> {
 
     pub fn on_action(mut self, on_action: impl Fn(EditorAction) -> Message + 'a) -> Self {
         self.on_action = Some(Box::new(on_action));
+        self
+    }
+
+    pub fn link_color(mut self, color: Color) -> Self {
+        self.link_color = color;
         self
     }
 }
@@ -107,16 +114,37 @@ fn font_for_marks(base: Font, marks: &[Mark]) -> Font {
     font
 }
 
-fn make_rich_paragraph(view: &ParagraphView, width: f32, base_font: Font) -> Paragraph {
+fn span_for_marks<'a>(
+    fragment: &'a str,
+    marks: &[Mark],
+    base_font: Font,
+    link_color: Color,
+) -> text::Span<'a> {
+    let span = text::Span::new(fragment).font(font_for_marks(base_font, marks));
+
+    if marks.iter().any(|mark| matches!(mark, Mark::Link { .. })) {
+        span.color(link_color)
+    } else {
+        span
+    }
+}
+
+fn make_rich_paragraph(
+    view: &ParagraphView,
+    width: f32,
+    base_font: Font,
+    link_color: Color,
+) -> Paragraph {
     let spans: Vec<text::Span<'_>> = view
         .marked_fragments()
-        .map(|(fragment, marks)| text::Span::new(fragment).font(font_for_marks(base_font, marks)))
+        .map(|(fragment, marks)| span_for_marks(fragment, marks, base_font, link_color))
         .collect();
 
     Paragraph::with_spans(
         paragraph_text(view.text(), width, base_font).with_content(spans.as_slice()),
     )
 }
+
 fn visual_line_boundary_key(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option<bool> {
     use keyboard::key::Named;
 
@@ -348,7 +376,7 @@ where
         }
 
         let font = renderer.font();
-
+        let link_color_changed = state.observed_link_color != Some(self.link_color);
         match views {
             Ok(views) => {
                 state.paragraphs.reserve(views.len());
@@ -360,9 +388,11 @@ where
 
                     // Document offsets do not affect shaping, but text and marks do.
                     let reusable = previous_item.filter(|item| {
-                        item.view
-                            .as_ref()
-                            .is_some_and(|old| old.has_same_content(&view))
+                        !link_color_changed
+                            && item
+                                .view
+                                .as_ref()
+                                .is_some_and(|old| old.has_same_content(&view))
                     });
 
                     let desired = paragraph_text(view.text(), content_width, font).with_content(());
@@ -375,10 +405,10 @@ where
                                 item.paragraph
                             }
                             text::Difference::Shape => {
-                                make_rich_paragraph(&view, content_width, font)
+                                make_rich_paragraph(&view, content_width, font, self.link_color)
                             }
                         },
-                        None => make_rich_paragraph(&view, content_width, font),
+                        None => make_rich_paragraph(&view, content_width, font, self.link_color),
                     };
 
                     let minimum_height = view.line_count() as f32 * LINE_HEIGHT;
@@ -434,6 +464,7 @@ where
 
         state.observed_selection = Some(selection);
         state.observed_viewport = Some(size);
+        state.observed_link_color = Some(self.link_color);
     }
 
     fn draw(
@@ -560,7 +591,7 @@ where
                 renderer.fill_paragraph(&item.paragraph, position, color, text_clip);
             }
 
-            for rectangle in state.underline_bounds() {
+            for (rectangle, is_link) in state.underline_bounds() {
                 let underline = Rectangle {
                     x: bounds.x + rectangle.x,
                     y: bounds.y + rectangle.y - state.scroll_y,
@@ -568,13 +599,15 @@ where
                     height: rectangle.height,
                 };
 
+                let underline_color = if is_link { self.link_color } else { color };
+
                 if let Some(underline) = underline.intersection(&text_clip) {
                     renderer.fill_quad(
                         renderer::Quad {
                             bounds: underline,
                             ..renderer::Quad::default()
                         },
-                        color,
+                        underline_color,
                     );
                 }
             }
@@ -1129,5 +1162,39 @@ mod tests {
         ] {
             assert_eq!(font_for_marks(Font::DEFAULT, &marks), expected);
         }
+    }
+
+    #[test]
+    fn link_spans_use_the_supplied_color_without_resetting_font_marks() {
+        let marks = [
+            Mark::Code,
+            Mark::Strong,
+            Mark::Emphasis,
+            Mark::Link {
+                href: "https://iced.rs/".to_owned(),
+                title: None,
+            },
+        ];
+
+        for color in [
+            Color::from_rgb8(0, 102, 204),
+            Color::from_rgb8(120, 190, 255),
+        ] {
+            let span = span_for_marks("link", &marks, Font::DEFAULT, color);
+
+            assert_eq!(span.color, Some(color));
+            assert_eq!(
+                span.font,
+                Some(Font {
+                    weight: Weight::Bold,
+                    style: Style::Italic,
+                    ..Font::MONOSPACE
+                })
+            );
+        }
+
+        let plain = span_for_marks("plain", &[], Font::DEFAULT, Color::from_rgb8(0, 102, 204));
+
+        assert_eq!(plain.color, None);
     }
 }

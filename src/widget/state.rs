@@ -4,7 +4,7 @@ use crate::{
 };
 
 use iced::{
-    Point, Rectangle, Size,
+    Color, Point, Rectangle, Size,
     advanced::{
         graphics::text::{Paragraph, cosmic_text::Cursor},
         widget::operation::Focusable,
@@ -44,6 +44,7 @@ pub(super) struct State {
     pub(super) ime: ImeState,
     pub(super) preferred_x: Option<f32>,
     pub(super) observed_preedit: Option<ObservedPreedit>,
+    pub(super) observed_link_color: Option<Color>,
     pub(super) paste: PasteState,
 }
 
@@ -293,7 +294,7 @@ impl State {
             .collect()
     }
 
-    pub(super) fn underline_bounds(&self) -> Vec<Rectangle> {
+    pub(super) fn underline_bounds(&self) -> Vec<(Rectangle, bool)> {
         if self.has_error {
             return Vec::new();
         }
@@ -560,36 +561,54 @@ impl LaidOutParagraph {
             .collect()
     }
 
-    fn underline_bounds(&self) -> Vec<Rectangle> {
+    fn underline_bounds(&self) -> Vec<(Rectangle, bool)> {
         let Some(view) = &self.view else {
             return Vec::new();
         };
 
-        view.underline_text_ranges()
-            .into_iter()
-            .flat_map(|(from, to)| {
-                let cursor_from = Cursor::new(from.line, from.byte);
-                let cursor_to = Cursor::new(to.line, to.byte);
+        let mut bounds = Vec::new();
 
-                self.paragraph.buffer().layout_runs().flat_map(move |run| {
-                    let thickness = run.line_height.min(1.0);
+        for (ranges, is_link) in [
+            (view.underline_text_ranges(), false),
+            (view.link_text_ranges(), true),
+        ] {
+            for (from, to) in ranges {
+                bounds.extend(
+                    self.underline_range_bounds(from, to)
+                        .into_iter()
+                        .map(|rectangle| (rectangle, is_link)),
+                );
+            }
+        }
 
-                    // Use the actual visual baseline with a small fixed offset.
-                    // This is not the font's underline metric or skip-ink shaping.
-                    let top = run.line_top;
-                    let bottom = top + run.line_height - thickness;
-                    let y = (run.line_y + 2.0).min(bottom).max(top);
+        bounds
+    }
 
-                    run.highlight(cursor_from, cursor_to)
-                        .filter_map(move |(x, width)| {
-                            (width > 0.0 && thickness > 0.0).then_some(Rectangle {
-                                x: self.origin.x + x,
-                                y: self.origin.y + y,
-                                width,
-                                height: thickness,
-                            })
+    fn underline_range_bounds(&self, from: TextPosition, to: TextPosition) -> Vec<Rectangle> {
+        let cursor_from = Cursor::new(from.line, from.byte);
+        let cursor_to = Cursor::new(to.line, to.byte);
+
+        self.paragraph
+            .buffer()
+            .layout_runs()
+            .flat_map(|run| {
+                let thickness = run.line_height.min(1.0);
+
+                // Use the actual visual baseline with a small fixed offset.
+                // This is not the font's underline metric or skip-ink shaping.
+                let top = run.line_top;
+                let bottom = top + run.line_height - thickness;
+                let y = (run.line_y + 2.0).min(bottom).max(top);
+
+                run.highlight(cursor_from, cursor_to)
+                    .filter_map(move |(x, width)| {
+                        (width > 0.0 && thickness > 0.0).then_some(Rectangle {
+                            x: self.origin.x + x,
+                            y: self.origin.y + y,
+                            width,
+                            height: thickness,
                         })
-                })
+                    })
             })
             .collect()
     }
