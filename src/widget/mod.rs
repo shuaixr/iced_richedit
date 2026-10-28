@@ -1,16 +1,19 @@
 mod ime;
+mod paste;
 mod state;
 
 use iced::{
     Border, Color, Element, Event, Font, Length, Pixels, Point, Rectangle, Size,
     advanced::{
-        Clipboard, InputMethod, Layout, Shell, Widget, clipboard,
+        InputMethod, Layout, Shell, Widget, clipboard,
         graphics::text::Paragraph,
         input_method::{self, Purpose},
         layout, mouse, renderer, text,
         widget::{Operation, Tree, tree},
     },
-    alignment, keyboard,
+    alignment,
+    font::{Style, Weight},
+    keyboard,
     widget::Id,
     window,
 };
@@ -18,7 +21,7 @@ use iced::{
 use iced::advanced::text::Paragraph as _;
 
 use crate::{
-    document::TextSelection,
+    document::{Mark, ParagraphView, TextSelection},
     editor::{EditorAction, EditorState},
     widget::state::ObservedPreedit,
 };
@@ -69,7 +72,7 @@ impl<'a, Message> RichEdit<'a, Message> {
     }
 }
 
-fn paragraph_text(content: &str, width: f32, font: Font) -> text::Text<&str, Font> {
+fn paragraph_text(content: &str, width: f32, font: Font) -> text::Text<&str> {
     text::Text {
         content,
         bounds: Size::new(width, f32::INFINITY),
@@ -80,6 +83,8 @@ fn paragraph_text(content: &str, width: f32, font: Font) -> text::Text<&str, Fon
         align_y: alignment::Vertical::Top,
         shaping: text::Shaping::Advanced,
         wrapping: text::Wrapping::WordOrGlyph,
+        ellipsis: text::Ellipsis::None,
+        hint_factor: None,
     }
 }
 
@@ -87,6 +92,30 @@ fn make_paragraph(content: &str, width: f32, font: Font) -> Paragraph {
     Paragraph::with_text(paragraph_text(content, width, font))
 }
 
+fn font_for_marks(base: Font, marks: &[Mark]) -> Font {
+    let mut font = base;
+
+    for mark in marks {
+        match mark {
+            Mark::Strong => font.weight = Weight::Bold,
+            Mark::Emphasis => font.style = Style::Italic,
+            Mark::Underline | Mark::Code | Mark::Link { .. } => {}
+        }
+    }
+
+    font
+}
+
+fn make_rich_paragraph(view: &ParagraphView, width: f32, base_font: Font) -> Paragraph {
+    let spans: Vec<text::Span<'_>> = view
+        .marked_fragments()
+        .map(|(fragment, marks)| text::Span::new(fragment).font(font_for_marks(base_font, marks)))
+        .collect();
+
+    Paragraph::with_spans(
+        paragraph_text(view.text(), width, base_font).with_content(spans.as_slice()),
+    )
+}
 fn visual_line_boundary_key(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option<bool> {
     use keyboard::key::Named;
 
@@ -238,9 +267,11 @@ fn keyboard_action(
     Some(EditorAction::InsertText(content.to_owned()))
 }
 
+impl<Message> iced::advanced::widget::Meta for RichEdit<'_, Message> {}
+
 impl<Message, Renderer> Widget<Message, iced::Theme, Renderer> for RichEdit<'_, Message>
 where
-    Renderer: text::Renderer<Font = Font, Paragraph = Paragraph>,
+    Renderer: text::Renderer<Paragraph = Paragraph>,
 {
     fn size(&self) -> Size<Length> {
         Size::new(self.width, self.height)
@@ -254,13 +285,9 @@ where
         tree::State::new(State::default())
     }
 
-    fn layout(
-        &mut self,
-        tree: &mut Tree,
-        renderer: &Renderer,
-        limits: &layout::Limits,
-    ) -> layout::Node {
+    fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) {
         let size = limits.resolve(self.width, self.height, Size::new(300.0, 300.0));
+        tree.size = size;
 
         let state = tree.state.downcast_mut::<State>();
         state.ime.synchronize(self.editor);
@@ -316,10 +343,10 @@ where
 
         if content_width == 0.0 {
             state.clamp_scroll(size.height);
-            return layout::Node::new(size);
+            return;
         }
 
-        let font = renderer.default_font();
+        let font = renderer.font();
 
         match views {
             Ok(views) => {
@@ -337,18 +364,20 @@ where
                             .is_some_and(|old| old.has_same_content(&view))
                     });
 
-                    let desired = paragraph_text(view.text(), content_width, font);
+                    let desired = paragraph_text(view.text(), content_width, font).with_content(());
 
                     let paragraph = match reusable {
-                        Some(mut item) => match item.paragraph.compare(desired.with_content(())) {
+                        Some(mut item) => match item.paragraph.compare(desired) {
                             text::Difference::None => item.paragraph,
                             text::Difference::Bounds => {
                                 item.paragraph.resize(desired.bounds);
                                 item.paragraph
                             }
-                            text::Difference::Shape => Paragraph::with_text(desired),
+                            text::Difference::Shape => {
+                                make_rich_paragraph(&view, content_width, font)
+                            }
                         },
-                        None => Paragraph::with_text(desired),
+                        None => make_rich_paragraph(&view, content_width, font),
                     };
 
                     let minimum_height = view.line_count() as f32 * LINE_HEIGHT;
@@ -404,8 +433,6 @@ where
 
         state.observed_selection = Some(selection);
         state.observed_viewport = Some(size);
-
-        layout::Node::new(size)
     }
 
     fn draw(
@@ -414,7 +441,7 @@ where
         renderer: &mut Renderer,
         theme: &iced::Theme,
         _style: &renderer::Style,
-        layout: Layout<'_>,
+        layout: Layout,
         _cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
@@ -433,11 +460,11 @@ where
                     bounds,
                     border: Border {
                         color: if state.is_focused && !state.window_unfocused {
-                            palette.primary
+                            palette.primary.base.color
                         } else {
                             Color {
                                 a: 0.3,
-                                ..palette.text
+                                ..palette.background.base.text
                             }
                         },
                         width: 1.0,
@@ -445,7 +472,7 @@ where
                     },
                     ..renderer::Quad::default()
                 },
-                palette.background,
+                palette.background.base.color,
             );
 
             let content_bounds = Rectangle {
@@ -460,9 +487,9 @@ where
             };
 
             let color = if state.has_error {
-                palette.danger
+                palette.danger.base.color
             } else {
-                palette.text
+                palette.background.base.text
             };
             let selection = self.editor.selection();
 
@@ -472,7 +499,7 @@ where
                 } else {
                     0.12
                 },
-                ..palette.primary
+                ..palette.primary.base.color
             };
 
             let selection_bounds = if state.ime.preedit().is_some() {
@@ -524,7 +551,7 @@ where
                                 bounds: underline,
                                 ..renderer::Quad::default()
                             },
-                            palette.text,
+                            palette.background.base.text,
                         );
                     }
                 }
@@ -552,7 +579,7 @@ where
                             bounds: caret,
                             ..renderer::Quad::default()
                         },
-                        palette.text,
+                        palette.background.base.text,
                     );
                 }
             }
@@ -562,7 +589,8 @@ where
     fn operate(
         &mut self,
         tree: &mut Tree,
-        layout: Layout<'_>,
+        layout: Layout,
+        _viewport: &Rectangle,
         _renderer: &Renderer,
         operation: &mut dyn Operation,
     ) {
@@ -579,17 +607,40 @@ where
         &mut self,
         tree: &mut Tree,
         event: &Event,
-        layout: Layout<'_>,
+        layout: Layout,
         cursor: mouse::Cursor,
         _renderer: &Renderer,
-        clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
         let state = tree.state.downcast_mut::<State>();
         state.ime.synchronize(self.editor);
         match event {
+            Event::Clipboard(clipboard::Event::Read(result)) => {
+                if !state.is_focused
+                    || state.window_unfocused
+                    || state.ime.blocks_keyboard()
+                    || self.on_action.is_none()
+                {
+                    state.paste.cancel();
+                }
+                if !state.paste.complete(self.editor) {
+                    return;
+                }
+                if let Ok(content) = result
+                    && let clipboard::Content::Text(text) = content.as_ref()
+                    && !text.is_empty()
+                    && let Some(on_action) = &self.on_action
+                {
+                    state.drag_anchor = None;
+                    state.preferred_x = None;
+                    state.caret_hint = None;
+                    shell.publish(on_action(EditorAction::PasteText(text.clone())));
+                }
+                shell.capture_event();
+            }
             Event::Window(window::Event::Unfocused) => {
+                state.paste.cancel();
                 state.window_unfocused = true;
                 state.preferred_x = None;
                 state.drag_anchor = None;
@@ -603,6 +654,7 @@ where
                 shell.request_redraw();
             }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                state.paste.cancel();
                 state.ime.cancel();
                 shell.invalidate_layout();
                 state.drag_anchor = None;
@@ -745,6 +797,7 @@ where
                 if matches!(key, keyboard::Key::Named(keyboard::key::Named::Process))
                     || state.ime.blocks_keyboard()
                 {
+                    state.paste.cancel();
                     shell.capture_event();
                     return;
                 }
@@ -771,9 +824,10 @@ where
 
                     match self.editor.selected_text() {
                         Ok(text) => {
-                            clipboard.write(clipboard::Kind::Standard, text);
+                            shell.write_clipboard(text);
 
                             if is_cut && let Some(on_action) = &self.on_action {
+                                state.paste.cancel();
                                 state.drag_anchor = None;
                                 state.preferred_x = None;
                                 state.caret_hint = None;
@@ -792,6 +846,10 @@ where
                 let Some(on_action) = &self.on_action else {
                     return;
                 };
+
+                if clipboard_shortcut != Some('v') {
+                    state.paste.cancel();
+                }
 
                 if let Some(down) = vertical_navigation_key(key, *modifiers) {
                     let selection = self.editor.selection();
@@ -853,13 +911,8 @@ where
                 }
 
                 if clipboard_shortcut == Some('v') {
-                    if let Some(text) = clipboard.read(clipboard::Kind::Standard)
-                        && !text.is_empty()
-                    {
-                        state.drag_anchor = None;
-                        state.preferred_x = None;
-                        state.caret_hint = None;
-                        shell.publish(on_action(EditorAction::PasteText(text)));
+                    if state.paste.request(self.editor) {
+                        shell.read_clipboard(clipboard::Kind::Text);
                     }
 
                     shell.capture_event();
@@ -906,6 +959,12 @@ where
                 shell.request_input_method(&input_method);
             }
             Event::InputMethod(event) => {
+                if matches!(
+                    event,
+                    input_method::Event::Preedit(..) | input_method::Event::Commit(_)
+                ) {
+                    state.paste.cancel();
+                }
                 if !state.is_focused
                     || state.window_unfocused
                     || state.has_error
@@ -950,9 +1009,46 @@ impl<'a, Message, Renderer> From<RichEdit<'a, Message>>
     for Element<'a, Message, iced::Theme, Renderer>
 where
     Message: 'a,
-    Renderer: text::Renderer<Font = Font, Paragraph = Paragraph> + 'a,
+    Renderer: text::Renderer<Paragraph = Paragraph> + 'a,
 {
     fn from(widget: RichEdit<'a, Message>) -> Self {
-        Element::new(widget)
+        widget._boxed()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unmarked_text_preserves_the_base_font() {
+        let base = Font {
+            weight: Weight::Light,
+            style: Style::Italic,
+            ..Font::MONOSPACE
+        };
+
+        assert_eq!(font_for_marks(base, &[]), base);
+    }
+
+    #[test]
+    fn strong_and_emphasis_combine_independently_of_order() {
+        let base = Font::MONOSPACE;
+
+        let expected = Font {
+            weight: Weight::Bold,
+            style: Style::Italic,
+            ..base
+        };
+
+        assert_eq!(
+            font_for_marks(base, &[Mark::Strong, Mark::Emphasis]),
+            expected,
+        );
+
+        assert_eq!(
+            font_for_marks(base, &[Mark::Emphasis, Mark::Strong]),
+            expected,
+        );
     }
 }

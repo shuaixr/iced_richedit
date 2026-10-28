@@ -106,6 +106,13 @@ impl ParagraphView {
         &self.text
     }
 
+    /// Returns marked fragments without exposing projection storage.
+    pub(crate) fn marked_fragments(&self) -> impl Iterator<Item = (&str, &[Mark])> + '_ {
+        self.runs
+            .iter()
+            .map(|run| (&self.text[run.range.clone()], run.marks.as_slice()))
+    }
+
     pub(crate) fn has_same_content(&self, other: &Self) -> bool {
         self.text == other.text && self.runs == other.runs
     }

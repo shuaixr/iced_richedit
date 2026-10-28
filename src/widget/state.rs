@@ -1,6 +1,6 @@
 use crate::{
     document::{ParagraphView, Position, TextPosition, TextSelection},
-    widget::ime::ImeState,
+    widget::{ime::ImeState, paste::PasteState},
 };
 
 use iced::{
@@ -44,6 +44,7 @@ pub(super) struct State {
     pub(super) ime: ImeState,
     pub(super) preferred_x: Option<f32>,
     pub(super) observed_preedit: Option<ObservedPreedit>,
+    pub(super) paste: PasteState,
 }
 
 impl Focusable for State {
@@ -56,6 +57,7 @@ impl Focusable for State {
     }
 
     fn unfocus(&mut self) {
+        self.paste.cancel();
         self.is_focused = false;
         self.drag_anchor = None;
         self.caret_hint = None;
@@ -509,15 +511,18 @@ impl LaidOutParagraph {
         self.paragraph
             .buffer()
             .layout_runs()
-            .filter_map(|run| {
-                let (x, width) = run.highlight(cursor_from, cursor_to)?;
-
-                (width > 0.0).then_some(Rectangle {
-                    x: self.origin.x + x,
-                    y: self.origin.y + run.line_top,
-                    width,
-                    height: run.line_height,
-                })
+            .flat_map(|run| {
+                let y = self.origin.y + run.line_top;
+                let height = run.line_height;
+                run.highlight(cursor_from, cursor_to)
+                    .filter_map(move |(x, width)| {
+                        (width > 0.0).then_some(Rectangle {
+                            x: self.origin.x + x,
+                            y,
+                            width,
+                            height,
+                        })
+                    })
             })
             .collect()
     }
