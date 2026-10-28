@@ -282,6 +282,17 @@ impl State {
         target.map(|(position, affinity, _)| (position, affinity))
     }
 
+    pub(super) fn code_background_bounds(&self) -> Vec<Rectangle> {
+        if self.has_error {
+            return Vec::new();
+        }
+
+        self.paragraphs
+            .iter()
+            .flat_map(|item| item.code_background_bounds())
+            .collect()
+    }
+
     pub(super) fn underline_bounds(&self) -> Vec<Rectangle> {
         if self.has_error {
             return Vec::new();
@@ -535,6 +546,17 @@ impl LaidOutParagraph {
                         })
                     })
             })
+            .collect()
+    }
+
+    fn code_background_bounds(&self) -> Vec<Rectangle> {
+        let Some(view) = &self.view else {
+            return Vec::new();
+        };
+
+        view.code_text_ranges()
+            .into_iter()
+            .flat_map(|(from, to)| self.text_range_bounds(from, to))
             .collect()
     }
 

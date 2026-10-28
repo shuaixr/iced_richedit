@@ -20,93 +20,110 @@ enum Message {
     ToggleStrong,
     ToggleEmphasis,
     ToggleUnderline,
+    ToggleCode,
 }
 
 impl Basic {
     fn new() -> Self {
         let mut value = serde_json::json!({
-                 "type": "doc",
-                 "content": [
-                     {
-                         "type": "paragraph",
-                         "content": [
-                             {
-                                 "type": "text",
-                                 "text": "Normal text. "
-                             },
-                             {
-                                 "type": "text",
-                                 "text": "Bold text. ",
-                                 "marks": [
-                                     { "type": "strong" }
-                                 ]
-                             },
-                             {
-                                 "type": "text",
-                                 "text": "Italic text. ",
-                                 "marks": [
-                                     { "type": "em" }
-                                 ]
-                             },
-                             {
-                                 "type": "text",
-                                 "text": "Bold italic text. ",
-                                 "marks": [
-                                     { "type": "strong" },
-                                     { "type": "em" }
-                                 ]
-                             },
-                              {
-            "type": "text",
-            "text": "Underlined text. ",
-            "marks": [
-                { "type": "underline" }
+            "type": "doc",
+            "content": [
+                {
+                    "type": "paragraph",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Normal text. "
+                        },
+                        {
+                            "type": "text",
+                            "text": "Bold text. ",
+                            "marks": [
+                                { "type": "strong" }
+                            ]
+                        },
+                        {
+                            "type": "text",
+                            "text": "Italic text. ",
+                            "marks": [
+                                { "type": "em" }
+                            ]
+                        },
+                        {
+                            "type": "text",
+                            "text": "Bold italic text. ",
+                            "marks": [
+                                { "type": "strong" },
+                                { "type": "em" }
+                            ]
+                        },
+                        {
+                            "type": "text",
+                            "text": "Underlined text. ",
+                            "marks": [
+                                { "type": "underline" }
+                            ]
+                        },
+                        {
+                            "type": "text",
+                            "text": "Bold underlined text. ",
+                            "marks": [
+                                { "type": "strong" },
+                                { "type": "underline" }
+                            ]
+                        },
+                        {
+                            "type": "text",
+                            "text": "let answer = 42; ",
+                            "marks": [
+                                { "type": "code" }
+                            ]
+                        },
+                        {
+                            "type": "text",
+                            "text": "Bold underlined code. ",
+                            "marks": [
+                                { "type": "code" },
+                                { "type": "strong" },
+                                { "type": "underline" }
+                            ]
+                        },
+                        {
+                            "type": "text",
+                            "text": "Resize the window to check wrapping across style boundaries."
+                        }
+                    ]
+                },
+                {
+                    "type": "paragraph"
+                },
+                {
+                    "type": "paragraph",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "中文文本、emoji 😀、组合字符 e\u{301} 。"
+                        }
+                    ]
+                },
+                {
+                    "type": "paragraph",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Before the hard break."
+                        },
+                        {
+                            "type": "hard_break"
+                        },
+                        {
+                            "type": "text",
+                            "text": "After the hard break."
+                        }
+                    ]
+                }
             ]
-        },
-        {
-            "type": "text",
-            "text": "Bold underlined text. ",
-            "marks": [
-                { "type": "strong" },
-                { "type": "underline" }
-            ]
-        },
-                             {
-                                 "type": "text",
-                                 "text": "Resize the window to check wrapping across style boundaries."
-                             }
-                         ]
-                     },
-                     {
-                         "type": "paragraph"
-                     },
-                     {
-                         "type": "paragraph",
-                         "content": [
-                             {
-                                 "type": "text",
-                                 "text": "中文文本、emoji 😀、组合字符 e\u{301} 。"
-                             }
-                         ]
-                     },
-                     {
-                         "type": "paragraph",
-                         "content": [
-                             {
-                                 "type": "text",
-                                 "text": "Before the hard break."
-                             },
-                             {
-                                 "type": "hard_break"
-                             },
-                             {
-                                 "type": "text",
-                                 "text": "After the hard break."
-                             }
-                         ]
-                     }
-                 ]
-             });
+        });
 
         let content = value["content"]
             .as_array_mut()
@@ -142,6 +159,7 @@ impl Basic {
             Message::ToggleStrong => self.editor.toggle_mark(Mark::Strong),
             Message::ToggleEmphasis => self.editor.toggle_mark(Mark::Emphasis),
             Message::ToggleUnderline => self.editor.toggle_mark(Mark::Underline),
+            Message::ToggleCode => self.editor.toggle_mark(Mark::Code),
         };
 
         self.error = result.err().map(|error| error.to_string());
@@ -176,6 +194,7 @@ impl Basic {
             button("Bold").on_press(Message::ToggleStrong),
             button("Italic").on_press(Message::ToggleEmphasis),
             button("Underline").on_press(Message::ToggleUnderline),
+            button("Code").on_press(Message::ToggleCode),
         ]
         .spacing(8);
         let status = self.error.as_deref().unwrap_or(

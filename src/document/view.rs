@@ -106,6 +106,16 @@ impl ParagraphView {
         &self.text
     }
 
+    /// Returns continuous underline ranges in displayed text coordinates.
+    pub(crate) fn underline_text_ranges(&self) -> Vec<(TextPosition, TextPosition)> {
+        self.text_ranges_for_mark(&Mark::Underline)
+    }
+
+    /// Returns continuous inline-code ranges in displayed text coordinates.
+    pub(crate) fn code_text_ranges(&self) -> Vec<(TextPosition, TextPosition)> {
+        self.text_ranges_for_mark(&Mark::Code)
+    }
+
     /// Returns marked fragments without exposing projection storage.
     pub(crate) fn marked_fragments(&self) -> impl Iterator<Item = (&str, &[Mark])> + '_ {
         self.runs
@@ -113,12 +123,12 @@ impl ParagraphView {
             .map(|run| (&self.text[run.range.clone()], run.marks.as_slice()))
     }
 
-    /// Returns continuous underline ranges in displayed text coordinates.
-    pub(crate) fn underline_text_ranges(&self) -> Vec<(TextPosition, TextPosition)> {
+    /// Returns continuous ranges carrying the given mark in display coordinates.
+    fn text_ranges_for_mark(&self, mark: &Mark) -> Vec<(TextPosition, TextPosition)> {
         let mut ranges: Vec<Range<usize>> = Vec::new();
 
         for run in &self.runs {
-            if !run.marks.contains(&Mark::Underline) || run.range.is_empty() {
+            if !run.marks.contains(mark) || run.range.is_empty() {
                 continue;
             }
 
@@ -627,5 +637,39 @@ mod tests {
                 TextPosition { line: 1, byte: 5 },
             )]
         );
+    }
+
+    #[test]
+    fn code_ranges_use_display_coordinates_and_ignore_other_marks() {
+        use super::append_text_run;
+        use crate::document::Mark;
+
+        let mut runs = Vec::new();
+
+        append_text_run(&mut runs, 0..1, &[Mark::Underline]);
+        append_text_run(&mut runs, 1..5, &[Mark::Code]);
+        append_text_run(&mut runs, 5..6, &[Mark::Strong, Mark::Code]);
+        append_text_run(&mut runs, 6..7, &[]);
+        append_text_run(&mut runs, 7..8, &[Mark::Code]);
+
+        let view =
+            ParagraphView::with_runs(Position::from_utf16_offset(1), "A中\nB C".to_owned(), runs);
+
+        assert_eq!(
+            view.code_text_ranges(),
+            vec![
+                (
+                    TextPosition { line: 0, byte: 1 },
+                    TextPosition { line: 1, byte: 1 },
+                ),
+                (
+                    TextPosition { line: 1, byte: 2 },
+                    TextPosition { line: 1, byte: 3 },
+                ),
+            ]
+        );
+
+        let plain = ParagraphView::new(Position::from_utf16_offset(1), "Plain text".to_owned());
+        assert!(plain.code_text_ranges().is_empty());
     }
 }

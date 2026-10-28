@@ -99,7 +99,8 @@ fn font_for_marks(base: Font, marks: &[Mark]) -> Font {
         match mark {
             Mark::Strong => font.weight = Weight::Bold,
             Mark::Emphasis => font.style = Style::Italic,
-            Mark::Underline | Mark::Code | Mark::Link { .. } => {}
+            Mark::Code => font.family = Font::MONOSPACE.family,
+            Mark::Underline | Mark::Link { .. } => {}
         }
     }
 
@@ -501,6 +502,30 @@ where
                 },
                 ..palette.primary.base.color
             };
+
+            let code_background = Color {
+                a: 0.08,
+                ..palette.background.base.text
+            };
+
+            for rectangle in state.code_background_bounds() {
+                let background = Rectangle {
+                    x: bounds.x + rectangle.x,
+                    y: bounds.y + rectangle.y - state.scroll_y,
+                    width: rectangle.width,
+                    height: rectangle.height,
+                };
+
+                if let Some(background) = background.intersection(&text_clip) {
+                    renderer.fill_quad(
+                        renderer::Quad {
+                            bounds: background,
+                            ..renderer::Quad::default()
+                        },
+                        code_background,
+                    );
+                }
+            }
 
             let selection_bounds = if state.ime.preedit().is_some() {
                 state.composition_selection_bounds()
@@ -1070,5 +1095,39 @@ mod tests {
             font_for_marks(base, &[Mark::Emphasis, Mark::Strong]),
             expected,
         );
+    }
+
+    #[test]
+    fn code_changes_only_the_font_family() {
+        let base = Font {
+            weight: Weight::Light,
+            style: Style::Italic,
+            stretch: iced::font::Stretch::Expanded,
+            ..Font::DEFAULT
+        };
+
+        let expected = Font {
+            family: Font::MONOSPACE.family,
+            ..base
+        };
+
+        assert_eq!(font_for_marks(base, &[Mark::Code]), expected);
+    }
+
+    #[test]
+    fn code_strong_and_emphasis_combine_independently_of_order() {
+        let expected = Font {
+            weight: Weight::Bold,
+            style: Style::Italic,
+            ..Font::MONOSPACE
+        };
+
+        for marks in [
+            [Mark::Code, Mark::Strong, Mark::Emphasis],
+            [Mark::Emphasis, Mark::Code, Mark::Strong],
+            [Mark::Strong, Mark::Emphasis, Mark::Code],
+        ] {
+            assert_eq!(font_for_marks(Font::DEFAULT, &marks), expected);
+        }
     }
 }
