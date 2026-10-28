@@ -113,6 +113,40 @@ impl ParagraphView {
             .map(|run| (&self.text[run.range.clone()], run.marks.as_slice()))
     }
 
+    /// Returns continuous underline ranges in displayed text coordinates.
+    pub(crate) fn underline_text_ranges(&self) -> Vec<(TextPosition, TextPosition)> {
+        let mut ranges: Vec<Range<usize>> = Vec::new();
+
+        for run in &self.runs {
+            if !run.marks.contains(&Mark::Underline) || run.range.is_empty() {
+                continue;
+            }
+
+            if let Some(previous) = ranges.last_mut()
+                && previous.end == run.range.start
+            {
+                previous.end = run.range.end;
+            } else {
+                ranges.push(run.range.clone());
+            }
+        }
+
+        ranges
+            .into_iter()
+            .map(|range| {
+                let from = self
+                    .display_text_position(range.start)
+                    .expect("mark ranges must start at valid display boundaries");
+
+                let to = self
+                    .display_text_position(range.end)
+                    .expect("mark ranges must end at valid display boundaries");
+
+                (from, to)
+            })
+            .collect()
+    }
+
     pub(crate) fn has_same_content(&self, other: &Self) -> bool {
         self.text == other.text && self.runs == other.runs
     }
@@ -501,6 +535,97 @@ mod tests {
         assert_eq!(
             view.text_position(Position::from_utf16_offset(6)),
             Some(TextPosition { line: 2, byte: 0 })
+        );
+    }
+
+    #[test]
+    fn underline_ranges_merge_across_font_marks_but_not_plain_text() {
+        use super::append_text_run;
+        use crate::document::Mark;
+
+        let mut runs = Vec::new();
+
+        append_text_run(&mut runs, 0..1, &[Mark::Underline]);
+        append_text_run(&mut runs, 1..2, &[Mark::Strong, Mark::Underline]);
+        append_text_run(&mut runs, 2..3, &[]);
+        append_text_run(&mut runs, 3..4, &[Mark::Underline]);
+
+        let view =
+            ParagraphView::with_runs(Position::from_utf16_offset(1), "ABCD".to_owned(), runs);
+
+        assert_eq!(
+            view.underline_text_ranges(),
+            vec![
+                (
+                    TextPosition { line: 0, byte: 0 },
+                    TextPosition { line: 0, byte: 2 },
+                ),
+                (
+                    TextPosition { line: 0, byte: 3 },
+                    TextPosition { line: 0, byte: 4 },
+                ),
+            ]
+        );
+
+        let plain = ParagraphView::new(Position::from_utf16_offset(1), "Plain text".to_owned());
+        assert!(plain.underline_text_ranges().is_empty());
+
+        let empty = ParagraphView::new(Position::from_utf16_offset(1), String::new());
+        assert!(empty.underline_text_ranges().is_empty());
+    }
+
+    #[test]
+    fn underline_ranges_follow_composition_display_and_inherited_marks() {
+        use super::append_text_run;
+        use crate::document::{Mark, TextSelection};
+
+        let mut runs = Vec::new();
+        append_text_run(&mut runs, 0..4, &[Mark::Underline]);
+
+        let original =
+            ParagraphView::with_runs(Position::from_utf16_offset(1), "ABCD".to_owned(), runs);
+
+        let selection = TextSelection::new(
+            Position::from_utf16_offset(2),
+            Position::from_utf16_offset(4),
+        );
+
+        let without_underline =
+            ParagraphView::compose(&original, &original, selection, "中\n😀", None, &[])
+                .expect("composition projection must succeed");
+
+        assert_eq!(without_underline.text(), "A中\n😀D");
+
+        assert_eq!(
+            without_underline.underline_text_ranges(),
+            vec![
+                (
+                    TextPosition { line: 0, byte: 0 },
+                    TextPosition { line: 0, byte: 1 },
+                ),
+                (
+                    TextPosition { line: 1, byte: 4 },
+                    TextPosition { line: 1, byte: 5 },
+                ),
+            ]
+        );
+
+        let with_underline = ParagraphView::compose(
+            &original,
+            &original,
+            selection,
+            "中\n😀",
+            None,
+            &[Mark::Underline],
+        )
+        .expect("composition projection must succeed");
+
+        assert_eq!(
+            with_underline.underline_text_ranges(),
+            vec![(
+                TextPosition { line: 0, byte: 0 },
+                TextPosition { line: 1, byte: 5 },
+            )]
         );
     }
 }

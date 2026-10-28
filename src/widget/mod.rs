@@ -534,6 +534,26 @@ where
 
                 renderer.fill_paragraph(&item.paragraph, position, color, text_clip);
             }
+
+            for rectangle in state.underline_bounds() {
+                let underline = Rectangle {
+                    x: bounds.x + rectangle.x,
+                    y: bounds.y + rectangle.y - state.scroll_y,
+                    width: rectangle.width,
+                    height: rectangle.height,
+                };
+
+                if let Some(underline) = underline.intersection(&text_clip) {
+                    renderer.fill_quad(
+                        renderer::Quad {
+                            bounds: underline,
+                            ..renderer::Quad::default()
+                        },
+                        color,
+                    );
+                }
+            }
+
             if state.is_focused && !state.window_unfocused && state.ime.preedit().is_some() {
                 for rectangle in state.composition_bounds() {
                     let thickness = rectangle.height.min(1.0);

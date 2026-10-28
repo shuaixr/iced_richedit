@@ -282,6 +282,17 @@ impl State {
         target.map(|(position, affinity, _)| (position, affinity))
     }
 
+    pub(super) fn underline_bounds(&self) -> Vec<Rectangle> {
+        if self.has_error {
+            return Vec::new();
+        }
+
+        self.paragraphs
+            .iter()
+            .flat_map(|item| item.underline_bounds())
+            .collect()
+    }
+
     pub(super) fn composition_bounds(&self) -> Vec<Rectangle> {
         if self.has_error {
             return Vec::new();
@@ -523,6 +534,40 @@ impl LaidOutParagraph {
                             height,
                         })
                     })
+            })
+            .collect()
+    }
+
+    fn underline_bounds(&self) -> Vec<Rectangle> {
+        let Some(view) = &self.view else {
+            return Vec::new();
+        };
+
+        view.underline_text_ranges()
+            .into_iter()
+            .flat_map(|(from, to)| {
+                let cursor_from = Cursor::new(from.line, from.byte);
+                let cursor_to = Cursor::new(to.line, to.byte);
+
+                self.paragraph.buffer().layout_runs().flat_map(move |run| {
+                    let thickness = run.line_height.min(1.0);
+
+                    // Use the actual visual baseline with a small fixed offset.
+                    // This is not the font's underline metric or skip-ink shaping.
+                    let top = run.line_top;
+                    let bottom = top + run.line_height - thickness;
+                    let y = (run.line_y + 2.0).min(bottom).max(top);
+
+                    run.highlight(cursor_from, cursor_to)
+                        .filter_map(move |(x, width)| {
+                            (width > 0.0 && thickness > 0.0).then_some(Rectangle {
+                                x: self.origin.x + x,
+                                y: self.origin.y + y,
+                                width,
+                                height: thickness,
+                            })
+                        })
+                })
             })
             .collect()
     }
