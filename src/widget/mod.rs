@@ -271,6 +271,7 @@ where
                 selection,
                 preedit.content,
                 preedit.selection.as_ref().map(|range| range.end),
+                self.editor.stored_marks(),
             ),
             None => self.editor.document().paragraph_views(),
         };
@@ -281,7 +282,7 @@ where
                     || views.len() != state.paragraphs.len()
                     || views.iter().zip(&state.paragraphs).any(|(view, previous)| {
                         previous.view.as_ref().is_none_or(|previous| {
-                            previous.start() != view.start() || previous.text() != view.text()
+                            previous.start() != view.start() || !previous.has_same_content(view)
                         })
                     })
             }
@@ -329,11 +330,11 @@ where
                 for view in views {
                     let previous_item = previous.next();
 
-                    // Document offsets do not affect text shaping.
+                    // Document offsets do not affect shaping, but text and marks do.
                     let reusable = previous_item.filter(|item| {
                         item.view
                             .as_ref()
-                            .is_some_and(|old| old.text() == view.text())
+                            .is_some_and(|old| old.has_same_content(&view))
                     });
 
                     let desired = paragraph_text(view.text(), content_width, font);

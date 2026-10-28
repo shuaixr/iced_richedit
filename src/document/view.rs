@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::document::{DocumentError, TextSelection};
+use crate::document::{DocumentError, Mark, TextSelection};
 
 use super::Position;
 
@@ -11,6 +11,53 @@ use super::Position;
 pub(crate) struct TextPosition {
     pub(crate) line: usize,
     pub(crate) byte: usize,
+}
+
+/// A mark range within the paragraph's complete UTF-8 text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct MarkedRange {
+    pub(super) range: Range<usize>,
+    pub(super) marks: Vec<Mark>,
+}
+
+pub(super) fn append_text_run(runs: &mut Vec<MarkedRange>, range: Range<usize>, marks: &[Mark]) {
+    if range.is_empty() {
+        return;
+    }
+
+    if let Some(previous) = runs.last_mut()
+        && previous.range.end == range.start
+        && previous.marks == marks
+    {
+        previous.range.end = range.end;
+        return;
+    }
+
+    runs.push(MarkedRange {
+        range,
+        marks: marks.to_vec(),
+    });
+}
+
+fn append_clipped_runs(
+    target: &mut Vec<MarkedRange>,
+    source: &[MarkedRange],
+    source_range: Range<usize>,
+    display_start: usize,
+) {
+    for run in source {
+        let start = run.range.start.max(source_range.start);
+        let end = run.range.end.min(source_range.end);
+
+        if start >= end {
+            continue;
+        }
+
+        let mapped_start = display_start + start - source_range.start;
+        let mapped_end = display_start + end - source_range.start;
+
+        append_text_run(target, mapped_start..mapped_end, &run.marks);
+    }
 }
 
 struct CompositionMap {
@@ -25,17 +72,27 @@ struct CompositionMap {
 pub(crate) struct ParagraphView {
     start: Position,
     text: String,
+    runs: Vec<MarkedRange>,
     lines: Vec<Range<usize>>,
     composition: Option<CompositionMap>,
 }
 
 impl ParagraphView {
+    #[cfg(test)]
     pub(super) fn new(start: Position, text: String) -> Self {
+        let mut runs = Vec::new();
+        append_text_run(&mut runs, 0..text.len(), &[]);
+
+        Self::with_runs(start, text, runs)
+    }
+
+    pub(super) fn with_runs(start: Position, text: String, runs: Vec<MarkedRange>) -> Self {
         let lines = logical_lines(&text);
 
         Self {
             start,
             text,
+            runs,
             lines,
             composition: None,
         }
@@ -47,6 +104,10 @@ impl ParagraphView {
 
     pub(crate) fn text(&self) -> &str {
         &self.text
+    }
+
+    pub(crate) fn has_same_content(&self, other: &Self) -> bool {
+        self.text == other.text && self.runs == other.runs
     }
 
     pub(crate) fn line_count(&self) -> usize {
@@ -166,6 +227,7 @@ impl ParagraphView {
         selection: TextSelection,
         preedit: &str,
         cursor_byte: Option<usize>,
+        preedit_marks: &[Mark],
     ) -> Result<Self, DocumentError> {
         let invalid_position = || {
             DocumentError::InvalidDocument(
@@ -236,11 +298,29 @@ impl ParagraphView {
             ));
         }
 
+        let mut runs = Vec::new();
+
+        append_clipped_runs(&mut runs, &first.runs, 0..prefix_end, 0);
+
+        append_text_run(
+            &mut runs,
+            prefix.len()..prefix.len() + preedit.len(),
+            preedit_marks,
+        );
+
+        append_clipped_runs(
+            &mut runs,
+            &last.runs,
+            suffix_start..last.text.len(),
+            prefix.len() + preedit.len(),
+        );
+
         let lines = logical_lines(&text);
 
         Ok(Self {
             start: first.start,
             text,
+            runs,
             lines,
             composition: Some(CompositionMap {
                 points,

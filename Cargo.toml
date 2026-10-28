@@ -23,3 +23,7 @@ required-features = ["example-basic"]
 [[example]]
 name = "ime_probe"
 required-features = ["example-basic"]
+
+[[example]]
+name = "m4_layout_probe"
+required-features = ["example-basic"]

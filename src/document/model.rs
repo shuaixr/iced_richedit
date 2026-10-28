@@ -1,6 +1,8 @@
 use crate::document::{
-    DocumentError, Mark, ParagraphView, Position, TextSelection, schema::DocumentSchema,
+    DocumentError, Mark, ParagraphView, Position, TextSelection,
+    schema::DocumentSchema,
     transaction::Transaction,
+    view::{MarkedRange, append_text_run},
 };
 use prosemirror::{
     dynamic::{DynamicNode, types::Dyn},
@@ -370,6 +372,44 @@ impl Document {
         })
     }
 
+    fn paragraph_text_runs(
+        &self,
+        block: &DynamicNode,
+    ) -> Result<(String, Vec<MarkedRange>), DocumentError> {
+        let mut text = String::new();
+        let mut runs = Vec::new();
+
+        for index in 0..block.child_count() {
+            let inline = block.maybe_child(index).ok_or_else(|| {
+                DocumentError::InvalidDocument("text block child is missing".to_owned())
+            })?;
+
+            let start = text.len();
+
+            if inline.is_text() {
+                text.push_str(&inline.text_content());
+            } else if inline.is_leaf() && inline.is_inline() && inline.node_size() == 1 {
+                // The current schema's only inline leaf is hard_break.
+                text.push('\n');
+            } else {
+                return Err(DocumentError::InvalidDocument(
+                    "paragraph projection encountered unsupported inline content".to_owned(),
+                ));
+            }
+
+            let marks = inline
+                .marks()
+                .into_iter()
+                .flat_map(|marks| marks.iter())
+                .map(|mark| self.schema.public_mark(mark))
+                .collect::<Result<Vec<_>, DocumentError>>()?;
+
+            append_text_run(&mut runs, start..text.len(), &marks);
+        }
+
+        Ok((text, runs))
+    }
+
     pub(crate) fn paragraph_views(&self) -> Result<Vec<ParagraphView>, DocumentError> {
         self.schema.scope(|| {
             let mut views = Vec::with_capacity(self.node.child_count());
@@ -386,11 +426,12 @@ impl Document {
                     ));
                 }
 
-                let text = Self::navigation_text(block)?;
+                let (text, runs) = self.paragraph_text_runs(block)?;
 
-                views.push(ParagraphView::new(
+                views.push(ParagraphView::with_runs(
                     Position::from_utf16_offset(block_start + 1),
                     text,
+                    runs,
                 ));
 
                 block_start += block.node_size();
@@ -541,6 +582,7 @@ impl Document {
         selection: TextSelection,
         preedit: &str,
         cursor_byte: Option<usize>,
+        stored_marks: Option<&[Mark]>,
     ) -> Result<Vec<ParagraphView>, DocumentError> {
         self.validate_selection(selection)?;
 
@@ -568,9 +610,26 @@ impl Document {
                 DocumentError::InvalidDocument("composition end paragraph is missing".to_owned())
             })?;
 
-        let composed =
-            ParagraphView::compose(&views[first], &views[last], selection, preedit, cursor_byte)?;
+        let inherited_marks;
 
+        let preedit_marks = match stored_marks {
+            Some(marks) => marks,
+            None => {
+                inherited_marks = self.marks_at(selection.from())?;
+                &inherited_marks
+            }
+        };
+
+        let preedit_marks = self.normalize_marks(preedit_marks)?;
+
+        let composed = ParagraphView::compose(
+            &views[first],
+            &views[last],
+            selection,
+            preedit,
+            cursor_byte,
+            &preedit_marks,
+        )?;
         views.splice(first..=last, std::iter::once(composed));
 
         Ok(views)
