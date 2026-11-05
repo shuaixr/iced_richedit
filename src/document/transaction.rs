@@ -5,11 +5,13 @@ use prosemirror::transform::structure::can_join;
 use prosemirror::transform::transform::StepError as TransformStepError;
 use prosemirror::{
     dynamic::{DynamicNode, types::Dyn},
-    model::{Fragment, Node, ResolvedPos},
+    model::{Fragment, Node, NodeType, ResolvedPos},
     transform::{MarkOrType, Transform},
 };
 
+use crate::document::text_block::text_blocks;
 use crate::document::{Document, DocumentError, Mark, Position, schema::DocumentSchema};
+use crate::document::{TextBlockKind, TextSelection};
 
 pub struct Transaction {
     schema: Arc<DocumentSchema>,
@@ -244,6 +246,59 @@ impl Transaction {
         Ok(self)
     }
 
+    pub(crate) fn split_text_block_for_enter(
+        &mut self,
+        position: Position,
+    ) -> Result<Position, DocumentError> {
+        let offset = self.validate_position(position)?;
+
+        let (kind, start, end) = self.schema.scope(|| {
+            let resolved = ResolvedPos::<Dyn>::resolve(&self.transform.doc, offset)
+                .map_err(|_| DocumentError::InvalidPosition { position: offset })?;
+
+            if resolved.depth != 1 || !resolved.parent().is_textblock() {
+                return Err(DocumentError::InvalidDocument(
+                    "Enter currently requires a top-level text block".to_owned(),
+                ));
+            }
+
+            Ok((
+                TextBlockKind::from_node(resolved.parent())?,
+                resolved.start(resolved.depth),
+                resolved.end(resolved.depth),
+            ))
+        })?;
+
+        if matches!(kind, TextBlockKind::Heading { .. }) && start == end {
+            self.set_text_block_kind(TextSelection::cursor(position), TextBlockKind::Paragraph)?;
+
+            return Ok(position);
+        }
+
+        self.split_paragraph(position)?;
+
+        let cursor = Position::from_utf16_offset(offset + 2);
+
+        if matches!(kind, TextBlockKind::Heading { .. }) {
+            let paragraph_cursor = if offset == start {
+                Some(position)
+            } else if offset == end {
+                Some(cursor)
+            } else {
+                None
+            };
+
+            if let Some(paragraph_cursor) = paragraph_cursor {
+                self.set_text_block_kind(
+                    TextSelection::cursor(paragraph_cursor),
+                    TextBlockKind::Paragraph,
+                )?;
+            }
+        }
+
+        Ok(cursor)
+    }
+
     fn apply_steps(&mut self, steps: &[Step<Dyn>]) -> Result<(), DocumentError> {
         self.schema.scope(|| {
             for step in steps {
@@ -260,6 +315,38 @@ impl Transaction {
         })
     }
 
+    pub(crate) fn clear_heading_at_start(
+        &mut self,
+        position: Position,
+    ) -> Result<bool, DocumentError> {
+        let offset = self.validate_position(position)?;
+
+        let should_convert = self.schema.scope(|| {
+            let resolved = ResolvedPos::<Dyn>::resolve(&self.transform.doc, offset)
+                .map_err(|_| DocumentError::InvalidPosition { position: offset })?;
+
+            if resolved.depth != 1 || !resolved.parent().is_textblock() {
+                return Err(DocumentError::InvalidDocument(
+                    "backward deletion currently requires a top-level text block".to_owned(),
+                ));
+            }
+
+            Ok(offset == resolved.start(resolved.depth)
+                && matches!(
+                    TextBlockKind::from_node(resolved.parent())?,
+                    TextBlockKind::Heading { .. }
+                ))
+        })?;
+
+        if !should_convert {
+            return Ok(false);
+        }
+
+        self.set_text_block_kind(TextSelection::cursor(position), TextBlockKind::Paragraph)?;
+
+        Ok(true)
+    }
+
     pub(crate) fn join_paragraphs(
         &mut self,
         position: Position,
@@ -268,11 +355,51 @@ impl Transaction {
         let previous_step_count = self.transform.steps.len();
 
         self.schema.scope(|| {
+            let resolved = ResolvedPos::<Dyn>::resolve(&self.transform.doc, offset)
+                .map_err(|_| DocumentError::InvalidPosition { position: offset })?;
+
+            if resolved.depth != 0 {
+                return Err(DocumentError::TransformFailed(
+                    "joining currently requires a boundary between top-level text blocks"
+                        .to_owned(),
+                ));
+            }
+
+            let index = resolved.index(0);
+
+            let left = index
+                .checked_sub(1)
+                .and_then(|index| self.transform.doc.maybe_child(index));
+
+            let right = self.transform.doc.maybe_child(index);
+
+            let (Some(left), Some(right)) = (left, right) else {
+                return Err(DocumentError::TransformFailed(
+                    "joining requires text blocks on both sides".to_owned(),
+                ));
+            };
+
+            if !left.is_textblock()
+                || !right.is_textblock()
+                || left.is_atom()
+                || right.is_atom()
+                || left.r#type().is_isolating()
+                || right.r#type().is_isolating()
+            {
+                return Err(DocumentError::TransformFailed(
+                    "joining requires non-atomic, non-isolating text blocks".to_owned(),
+                ));
+            }
+
+            TextBlockKind::from_node(left)?;
+            TextBlockKind::from_node(right)?;
+
             if can_join::<Dyn>(&self.transform.doc, offset) != Some(true) {
                 return Err(DocumentError::TransformFailed(format!(
                     "paragraphs cannot be joined at position {offset}"
                 )));
             }
+
             self.transform.join(offset, Some(1));
 
             if self.transform.steps.len() == previous_step_count {
@@ -318,6 +445,81 @@ impl Transaction {
         }
 
         Ok(cursor)
+    }
+
+    pub(crate) fn set_text_block_kind(
+        &mut self,
+        selection: TextSelection,
+        kind: TextBlockKind,
+    ) -> Result<&mut Self, DocumentError> {
+        let from = self.validate_position(selection.from())?;
+        let to = self.validate_position(selection.to())?;
+
+        let attrs = match kind {
+            TextBlockKind::Paragraph => serde_json::json!({}),
+            TextBlockKind::Heading { level } => {
+                TextBlockKind::heading(level)?;
+                serde_json::json!({ "level": level })
+            }
+        };
+
+        self.schema.scope(|| {
+            let target_type = self.schema.text_block_type(kind)?;
+            let mut targets = Vec::new();
+            let mut selected = false;
+
+            for source in text_blocks(&self.transform.doc)? {
+                let start = source.content_start();
+                let end = source.content_end();
+
+                let overlaps = if selection.is_empty() {
+                    start <= from && from <= end
+                } else {
+                    end >= from && start < to
+                };
+
+                if !overlaps {
+                    continue;
+                }
+
+                if source.depth != 1 {
+                    return Err(DocumentError::TransformFailed(
+                        "block conversion currently requires top-level text blocks".to_owned(),
+                    ));
+                }
+
+                selected = true;
+
+                if TextBlockKind::from_node(source.node)? != kind {
+                    targets.push(source.before());
+                }
+            }
+
+            if !selected {
+                return Err(DocumentError::InvalidPosition { position: from });
+            }
+
+            for before in targets {
+                let previous = self.transform.steps.len();
+
+                self.transform.set_node_markup(
+                    before,
+                    Some(target_type),
+                    Some(attrs.clone()),
+                    None,
+                );
+
+                if self.transform.steps.len() == previous {
+                    return Err(DocumentError::TransformFailed(format!(
+                        "text block could not be converted at position {before}"
+                    )));
+                }
+            }
+
+            Ok(())
+        })?;
+
+        Ok(self)
     }
 }
 pub(crate) struct TransactionResult {

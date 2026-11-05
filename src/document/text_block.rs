@@ -1,6 +1,51 @@
-use prosemirror::{dynamic::DynamicNode, model::Node};
+use prosemirror::{
+    dynamic::DynamicNode,
+    model::{Node, NodeType},
+};
 
 use super::DocumentError;
+
+/// Built-in text block semantics currently supported by the projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextBlockKind {
+    Paragraph,
+    Heading { level: u8 },
+}
+
+impl TextBlockKind {
+    pub(crate) fn heading(level: u8) -> Result<Self, DocumentError> {
+        if !(1..=6).contains(&level) {
+            return Err(DocumentError::InvalidDocument(
+                "heading level must be an integer from 1 to 6".to_owned(),
+            ));
+        }
+
+        Ok(Self::Heading { level })
+    }
+
+    pub(super) fn from_node(node: &DynamicNode) -> Result<Self, DocumentError> {
+        match node.r#type().name() {
+            "paragraph" => Ok(Self::Paragraph),
+            "heading" => {
+                let level = node
+                    .attrs_json()
+                    .get("level")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| u8::try_from(value).ok())
+                    .ok_or_else(|| {
+                        DocumentError::InvalidDocument(
+                            "heading level must be an integer from 1 to 6".to_owned(),
+                        )
+                    })?;
+
+                Self::heading(level)
+            }
+            _ => Err(DocumentError::InvalidDocument(
+                "projection encountered an unsupported text block type".to_owned(),
+            )),
+        }
+    }
+}
 
 /// A borrowed text block and its actual location in the document tree.
 ///
@@ -18,6 +63,10 @@ impl TextBlockSource<'_> {
 
     pub(super) fn content_end(&self) -> usize {
         self.content_start() + self.node.content_size()
+    }
+
+    pub(super) fn before(&self) -> usize {
+        self.before
     }
 }
 

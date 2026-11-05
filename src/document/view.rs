@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::document::{DocumentError, Mark, TextSelection};
+use crate::document::{DocumentError, Mark, TextBlockKind, TextSelection};
 
 use super::Position;
 
@@ -74,6 +74,7 @@ pub(crate) struct ParagraphView {
     text: String,
     runs: Vec<MarkedRange>,
     lines: Vec<Range<usize>>,
+    kind: TextBlockKind,
     composition: Option<CompositionMap>,
 }
 
@@ -83,13 +84,19 @@ impl ParagraphView {
         let mut runs = Vec::new();
         append_text_run(&mut runs, 0..text.len(), &[]);
 
-        Self::with_runs(start, text, runs)
+        Self::with_runs(start, text, runs, TextBlockKind::Paragraph)
     }
 
-    pub(super) fn with_runs(start: Position, text: String, runs: Vec<MarkedRange>) -> Self {
+    pub(super) fn with_runs(
+        start: Position,
+        text: String,
+        runs: Vec<MarkedRange>,
+        kind: TextBlockKind,
+    ) -> Self {
         let lines = logical_lines(&text);
 
         Self {
+            kind,
             start,
             text,
             runs,
@@ -104,6 +111,10 @@ impl ParagraphView {
 
     pub(crate) fn text(&self) -> &str {
         &self.text
+    }
+
+    pub(crate) fn kind(&self) -> TextBlockKind {
+        self.kind
     }
 
     /// Returns ordinary underline ranges, excluding text styled as links.
@@ -171,7 +182,7 @@ impl ParagraphView {
     }
 
     pub(crate) fn has_same_content(&self, other: &Self) -> bool {
-        self.text == other.text && self.runs == other.runs
+        self.kind == other.kind && self.text == other.text && self.runs == other.runs
     }
 
     pub(crate) fn line_count(&self) -> usize {
@@ -382,6 +393,7 @@ impl ParagraphView {
         let lines = logical_lines(&text);
 
         Ok(Self {
+            kind: first.kind,
             start: first.start,
             text,
             runs,
@@ -495,7 +507,7 @@ fn logical_lines(text: &str) -> Vec<Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::{ParagraphView, TextPosition};
-    use crate::document::Position;
+    use crate::document::{Position, TextBlockKind};
 
     #[test]
     fn maps_utf16_positions_to_logical_utf8_positions() {
@@ -573,8 +585,12 @@ mod tests {
         append_text_run(&mut runs, 2..3, &[]);
         append_text_run(&mut runs, 3..4, &[Mark::Underline]);
 
-        let view =
-            ParagraphView::with_runs(Position::from_utf16_offset(1), "ABCD".to_owned(), runs);
+        let view = ParagraphView::with_runs(
+            Position::from_utf16_offset(1),
+            "ABCD".to_owned(),
+            runs,
+            TextBlockKind::Paragraph,
+        );
 
         assert_eq!(
             view.underline_text_ranges(),
@@ -605,8 +621,12 @@ mod tests {
         let mut runs = Vec::new();
         append_text_run(&mut runs, 0..4, &[Mark::Underline]);
 
-        let original =
-            ParagraphView::with_runs(Position::from_utf16_offset(1), "ABCD".to_owned(), runs);
+        let original = ParagraphView::with_runs(
+            Position::from_utf16_offset(1),
+            "ABCD".to_owned(),
+            runs,
+            TextBlockKind::Paragraph,
+        );
 
         let selection = TextSelection::new(
             Position::from_utf16_offset(2),
@@ -665,8 +685,12 @@ mod tests {
         append_text_run(&mut runs, 6..7, &[]);
         append_text_run(&mut runs, 7..8, &[Mark::Code]);
 
-        let view =
-            ParagraphView::with_runs(Position::from_utf16_offset(1), "A中\nB C".to_owned(), runs);
+        let view = ParagraphView::with_runs(
+            Position::from_utf16_offset(1),
+            "A中\nB C".to_owned(),
+            runs,
+            TextBlockKind::Paragraph,
+        );
 
         assert_eq!(
             view.code_text_ranges(),
@@ -703,8 +727,12 @@ mod tests {
         append_text_run(&mut runs, 2..3, &[Mark::Strong, link]);
         append_text_run(&mut runs, 3..4, &[]);
 
-        let view =
-            ParagraphView::with_runs(Position::from_utf16_offset(1), "ABCD".to_owned(), runs);
+        let view = ParagraphView::with_runs(
+            Position::from_utf16_offset(1),
+            "ABCD".to_owned(),
+            runs,
+            TextBlockKind::Paragraph,
+        );
 
         assert_eq!(
             view.underline_text_ranges(),
@@ -721,5 +749,36 @@ mod tests {
                 TextPosition { line: 0, byte: 3 },
             )]
         );
+    }
+
+    #[test]
+    fn composition_preserves_the_first_text_block_kind() {
+        use crate::document::TextSelection;
+
+        let mut runs = Vec::new();
+        super::append_text_run(&mut runs, 0..2, &[]);
+
+        let original = ParagraphView::with_runs(
+            Position::from_utf16_offset(1),
+            "AB".to_owned(),
+            runs,
+            TextBlockKind::Heading { level: 2 },
+        );
+
+        let composed = ParagraphView::compose(
+            &original,
+            &original,
+            TextSelection::new(
+                Position::from_utf16_offset(1),
+                Position::from_utf16_offset(2),
+            ),
+            "C",
+            Some(0),
+            &[],
+        )
+        .expect("composition projection");
+
+        assert_eq!(composed.text(), "CB");
+        assert_eq!(composed.kind(), TextBlockKind::Heading { level: 2 });
     }
 }

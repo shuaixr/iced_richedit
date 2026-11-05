@@ -21,8 +21,9 @@ enum Message {
     ToggleEmphasis,
     ToggleUnderline,
     ToggleCode,
-
     SetLink,
+    SetHeading(u8),
+    SetParagraph,
     RemoveLink,
 }
 
@@ -31,6 +32,18 @@ impl Basic {
         let mut value = serde_json::json!({
             "type": "doc",
             "content": [
+                {
+                    "type": "heading",
+                    "attrs": {
+                        "level": 1
+                    },
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Rich text editor"
+                        }
+                    ]
+                },
                 {
                     "type": "paragraph",
                     "content": [
@@ -42,53 +55,75 @@ impl Basic {
                             "type": "text",
                             "text": "Bold text. ",
                             "marks": [
-                                { "type": "strong" }
+                                {
+                                    "type": "strong"
+                                }
                             ]
                         },
                         {
                             "type": "text",
                             "text": "Italic text. ",
                             "marks": [
-                                { "type": "em" }
+                                {
+                                    "type": "em"
+                                }
                             ]
                         },
                         {
                             "type": "text",
                             "text": "Bold italic text. ",
                             "marks": [
-                                { "type": "strong" },
-                                { "type": "em" }
+                                {
+                                    "type": "strong"
+                                },
+                                {
+                                    "type": "em"
+                                }
                             ]
                         },
                         {
                             "type": "text",
                             "text": "Underlined text. ",
                             "marks": [
-                                { "type": "underline" }
+                                {
+                                    "type": "underline"
+                                }
                             ]
                         },
                         {
                             "type": "text",
                             "text": "Bold underlined text. ",
                             "marks": [
-                                { "type": "strong" },
-                                { "type": "underline" }
+                                {
+                                    "type": "strong"
+                                },
+                                {
+                                    "type": "underline"
+                                }
                             ]
                         },
                         {
                             "type": "text",
                             "text": "let answer = 42; ",
                             "marks": [
-                                { "type": "code" }
+                                {
+                                    "type": "code"
+                                }
                             ]
                         },
                         {
                             "type": "text",
                             "text": "Bold underlined code. ",
                             "marks": [
-                                { "type": "code" },
-                                { "type": "strong" },
-                                { "type": "underline" }
+                                {
+                                    "type": "code"
+                                },
+                                {
+                                    "type": "strong"
+                                },
+                                {
+                                    "type": "underline"
+                                }
                             ]
                         },
                         {
@@ -108,9 +143,15 @@ impl Basic {
                             "type": "text",
                             "text": "Bold underlined code link. ",
                             "marks": [
-                                { "type": "strong" },
-                                { "type": "underline" },
-                                { "type": "code" },
+                                {
+                                    "type": "strong"
+                                },
+                                {
+                                    "type": "underline"
+                                },
+                                {
+                                    "type": "code"
+                                },
                                 {
                                     "type": "link",
                                     "attrs": {
@@ -192,10 +233,11 @@ impl Basic {
             Message::ToggleEmphasis => self.editor.toggle_mark(Mark::Emphasis),
             Message::ToggleUnderline => self.editor.toggle_mark(Mark::Underline),
             Message::ToggleCode => self.editor.toggle_mark(Mark::Code),
-
             Message::SetLink => self
                 .editor
                 .set_link("https://iced.rs/".to_owned(), Some("iced".to_owned())),
+            Message::SetHeading(level) => self.editor.set_heading(level),
+            Message::SetParagraph => self.editor.set_paragraph(),
             Message::RemoveLink => self.editor.remove_link(),
         };
 
@@ -236,6 +278,12 @@ impl Basic {
             button("Remove link").on_press(Message::RemoveLink),
         ]
         .spacing(8);
+        let blocks = row![
+            button("H1").on_press(Message::SetHeading(1)),
+            button("H2").on_press(Message::SetHeading(2)),
+            button("Body").on_press(Message::SetParagraph),
+        ]
+        .spacing(8);
         let status = self.error.as_deref().unwrap_or(
             "Select text and use Bold or Italic to change formatting. \
         Type to replace the selection. Try undo/redo, clipboard operations, \
@@ -247,6 +295,7 @@ impl Basic {
                 text("Rich editor: action dispatch"),
                 controls,
                 formatting,
+                blocks,
                 editor,
                 text(status),
             ]

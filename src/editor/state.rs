@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use crate::{
-    document::{Document, Mark, Position, TextSelection, TransactionResult},
+    document::{Document, Mark, Position, TextBlockKind, TextSelection, TransactionResult},
     editor::{
         CompositionContext, EditorAction,
         error::EditorError,
@@ -293,13 +293,11 @@ impl EditorState {
                 .map_err(EditorError::Document)?;
         }
 
-        transaction
-            .split_paragraph(from)
+        let cursor = transaction
+            .split_text_block_for_enter(from)
             .map_err(EditorError::Document)?;
 
-        let selection = TextSelection::cursor(Position::from_utf16_offset(from.utf16_offset() + 2));
-
-        self.dispatch_cursor_edit(transaction.finish(), selection.head(), None, None)
+        self.dispatch_cursor_edit(transaction.finish(), cursor, None, None)
     }
 
     pub fn undo(&mut self) -> Result<(), EditorError> {
@@ -431,6 +429,15 @@ impl EditorState {
         }
 
         let current = self.selection.head();
+        let mut transaction = self.document.transaction();
+
+        if !forward
+            && transaction
+                .clear_heading_at_start(current)
+                .map_err(EditorError::Document)?
+        {
+            return self.dispatch_cursor_edit(transaction.finish(), current, None, None);
+        }
 
         let adjacent = if by_word {
             self.document.adjacent_word_position(current, forward)
@@ -449,8 +456,6 @@ impl EditorState {
             .document
             .cursor_at_paragraph_boundary(current, forward)
             .map_err(EditorError::Document)?;
-
-        let mut transaction = self.document.transaction();
 
         let cursor = if at_boundary {
             let join_offset = if forward {
@@ -724,6 +729,32 @@ impl EditorState {
     /// Returns whether a captured composition context is still current.
     pub fn is_composition_context_current(&self, context: &CompositionContext) -> bool {
         self.composition_context.matches(context)
+    }
+
+    /// Converts selected text blocks to headings as one history event.
+    pub fn set_heading(&mut self, level: u8) -> Result<(), EditorError> {
+        let kind = TextBlockKind::heading(level).map_err(EditorError::Document)?;
+
+        self.set_text_block_kind(kind)
+    }
+
+    /// Converts selected text blocks to ordinary paragraphs.
+    pub fn set_paragraph(&mut self) -> Result<(), EditorError> {
+        self.set_text_block_kind(TextBlockKind::Paragraph)
+    }
+
+    fn set_text_block_kind(&mut self, kind: TextBlockKind) -> Result<(), EditorError> {
+        let mut transaction = self.document.transaction();
+
+        transaction
+            .set_text_block_kind(self.selection, kind)
+            .map_err(EditorError::Document)?;
+
+        self.dispatch_transaction(
+            transaction.finish(),
+            self.selection,
+            self.stored_marks.clone(),
+        )
     }
 }
 

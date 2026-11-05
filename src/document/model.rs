@@ -1,5 +1,5 @@
 use crate::document::{
-    DocumentError, Mark, ParagraphView, Position, TextSelection,
+    DocumentError, Mark, ParagraphView, Position, TextBlockKind, TextSelection,
     schema::DocumentSchema,
     text_block::text_blocks,
     transaction::Transaction,
@@ -416,6 +416,7 @@ impl Document {
                     Position::from_utf16_offset(source.content_start()),
                     text,
                     runs,
+                    TextBlockKind::from_node(source.node)?,
                 ));
             }
 

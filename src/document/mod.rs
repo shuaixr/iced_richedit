@@ -15,5 +15,6 @@ pub use position::Position;
 pub use selection::TextSelection;
 pub use transaction::Transaction;
 
+pub(crate) use text_block::TextBlockKind;
 pub(crate) use transaction::{DocumentChange, TransactionResult};
 pub(crate) use view::{ParagraphView, TextPosition};

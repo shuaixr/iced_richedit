@@ -23,7 +23,7 @@ use iced::{
 use iced::advanced::text::Paragraph as _;
 
 use crate::{
-    document::{Mark, ParagraphView, TextSelection},
+    document::{Mark, ParagraphView, TextBlockKind, TextSelection},
     editor::{EditorAction, EditorState},
     widget::state::ObservedPreedit,
 };
@@ -97,6 +97,28 @@ fn paragraph_text(content: &str, width: f32, font: Font) -> text::Text<&str> {
     }
 }
 
+fn rich_paragraph_text(view: &ParagraphView, width: f32, font: Font) -> text::Text<&str> {
+    let mut descriptor = paragraph_text(view.text(), width, font);
+
+    if let TextBlockKind::Heading { level } = view.kind() {
+        let size = match level {
+            1 => 32.0,
+            2 => 28.0,
+            3 => 24.0,
+            4 => 20.0,
+            5 => 18.0,
+            6 => 16.0,
+            _ => unreachable!("heading levels are validated by the document"),
+        };
+
+        descriptor.font.weight = Weight::Bold;
+        descriptor.size = Pixels(size);
+        descriptor.line_height = text::LineHeight::Absolute(Pixels(size * 1.5));
+    }
+
+    descriptor
+}
+
 fn make_paragraph(content: &str, width: f32, font: Font) -> Paragraph {
     Paragraph::with_text(paragraph_text(content, width, font))
 }
@@ -137,14 +159,14 @@ fn make_rich_paragraph(
     base_font: Font,
     link_color: Color,
 ) -> Paragraph {
+    let descriptor = rich_paragraph_text(view, width, base_font);
+
     let spans: Vec<text::Span<'_>> = view
         .marked_fragments()
-        .map(|(fragment, marks)| span_for_marks(fragment, marks, base_font, link_color))
+        .map(|(fragment, marks)| span_for_marks(fragment, marks, descriptor.font, link_color))
         .collect();
 
-    Paragraph::with_spans(
-        paragraph_text(view.text(), width, base_font).with_content(spans.as_slice()),
-    )
+    Paragraph::with_spans(descriptor.with_content(spans.as_slice()))
 }
 
 fn visual_line_boundary_key(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option<bool> {
@@ -397,7 +419,9 @@ where
                                 .is_some_and(|old| old.has_same_content(&view))
                     });
 
-                    let desired = paragraph_text(view.text(), content_width, font).with_content(());
+                    let desired = rich_paragraph_text(&view, content_width, font).with_content(());
+
+                    let line_height = desired.line_height.to_absolute(desired.size).0;
 
                     let paragraph = match reusable {
                         Some(mut item) => match item.paragraph.compare(desired) {
@@ -413,7 +437,7 @@ where
                         None => make_rich_paragraph(&view, content_width, font, self.link_color),
                     };
 
-                    let minimum_height = view.line_count() as f32 * LINE_HEIGHT;
+                    let minimum_height = view.line_count() as f32 * line_height;
 
                     let height = paragraph.min_height().max(minimum_height);
 
