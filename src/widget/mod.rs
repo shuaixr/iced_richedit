@@ -1,3 +1,5 @@
+#[cfg(all(test, feature = "renderer-tests"))]
+mod cache_tests;
 mod ime;
 mod paste;
 mod state;

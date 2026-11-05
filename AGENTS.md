@@ -11,9 +11,11 @@ This repository contains the `iced_richedit` Rust library, an advanced rich text
 
 Organize code by feature or domain. Build small, cohesive modules with explicit responsibilities and straightforward control flow. Do not commit generated output unless distribution artifacts are intentionally versioned.
 
+The long-term goal is to support arbitrary valid ProseMirror documents, including custom schemas, nodes, marks, attributes, and nesting. This is not a current compatibility claim. Keep schema validation and model preservation distinct from registered rendering and editing capabilities; never silently flatten unsupported content or discard its attributes. Extend capabilities incrementally without exposing ProseMirror types or building speculative frameworks.
+
 ## Build, Test, and Development Commands
 
-Use `cargo check` for fast compilation checks, `cargo test` for the test suite, `cargo fmt --check` for formatting, and `cargo clippy --all-targets --all-features -- -D warnings` for linting. Run all four before submitting work.
+Use `cargo check` for fast compilation checks, `cargo test --features renderer-tests --lib --tests` for the full library test suite, `cargo fmt --check` for formatting, and `cargo clippy --all-targets --all-features -- -D warnings` for linting. Run all four before submitting work. Plain `cargo test` omits the feature-gated renderer cache tests.
 
 ## Coding Style & Naming Conventions
 

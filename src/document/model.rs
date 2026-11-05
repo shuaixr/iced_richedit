@@ -1,6 +1,7 @@
 use crate::document::{
     DocumentError, Mark, ParagraphView, Position, TextSelection,
     schema::DocumentSchema,
+    text_block::text_blocks,
     transaction::Transaction,
     view::{MarkedRange, append_text_run},
 };
@@ -62,22 +63,20 @@ impl Document {
     pub(crate) fn from_parts(schema: Arc<DocumentSchema>, node: DynamicNode) -> Self {
         Self { schema, node }
     }
+
     pub(crate) fn initial_selection(&self) -> Result<TextSelection, DocumentError> {
         self.schema.scope(|| {
-            let first_child = self.node.maybe_child(0).ok_or_else(|| {
+            let blocks = text_blocks(&self.node)?;
+
+            let first = blocks.first().ok_or_else(|| {
                 DocumentError::InvalidDocument("document contains no text block".to_owned())
             })?;
 
-            if !first_child.inline_content() {
-                return Err(DocumentError::InvalidDocument(
-                    "the first block does not support a text cursor".to_owned(),
-                ));
-            }
-
-            Ok(TextSelection::cursor(Position::from_utf16_offset(1)))
+            Ok(TextSelection::cursor(Position::from_utf16_offset(
+                first.content_start(),
+            )))
         })
     }
-
     pub(crate) fn validate_selection(&self, selection: TextSelection) -> Result<(), DocumentError> {
         self.schema.scope(|| {
             for position in [selection.anchor(), selection.head()] {
@@ -250,34 +249,24 @@ impl Document {
                     adjacent = Some(candidate);
                 }
             };
-
-            let mut block_start = 0;
-
-            for block_index in 0..self.node.child_count() {
-                let block = self.node.maybe_child(block_index).ok_or_else(|| {
-                    DocumentError::InvalidDocument("document block is missing".to_owned())
-                })?;
-
-                if !block.is_textblock() {
+            for source in text_blocks(&self.node)? {
+                if source.depth != 1 {
                     return Err(DocumentError::InvalidDocument(
                         "cursor navigation requires top-level text blocks".to_owned(),
                     ));
                 }
 
-                let text = Self::navigation_text(block)?;
-
-                let content_start = block_start + 1;
+                let text = Self::navigation_text(source.node)?;
+                let content_start = source.content_start();
                 let mut utf16_offset = 0;
 
-                // An empty paragraph still has one valid cursor position.
+                // An empty text block still has one valid cursor position.
                 consider(content_start);
 
                 for grapheme in text.graphemes(true) {
                     utf16_offset += grapheme.encode_utf16().count();
                     consider(content_start + utf16_offset);
                 }
-
-                block_start += block.node_size();
             }
 
             Ok(adjacent.map(Position::from_utf16_offset))
@@ -409,32 +398,25 @@ impl Document {
 
         Ok((text, runs))
     }
-
     pub(crate) fn paragraph_views(&self) -> Result<Vec<ParagraphView>, DocumentError> {
         self.schema.scope(|| {
-            let mut views = Vec::with_capacity(self.node.child_count());
-            let mut block_start = 0;
+            let blocks = text_blocks(&self.node)?;
+            let mut views = Vec::with_capacity(blocks.len());
 
-            for index in 0..self.node.child_count() {
-                let block = self.node.maybe_child(index).ok_or_else(|| {
-                    DocumentError::InvalidDocument("document block is missing".to_owned())
-                })?;
-
-                if !block.is_textblock() {
+            for source in blocks {
+                if source.depth != 1 {
                     return Err(DocumentError::InvalidDocument(
                         "paragraph projection requires top-level text blocks".to_owned(),
                     ));
                 }
 
-                let (text, runs) = self.paragraph_text_runs(block)?;
+                let (text, runs) = self.paragraph_text_runs(source.node)?;
 
                 views.push(ParagraphView::with_runs(
-                    Position::from_utf16_offset(block_start + 1),
+                    Position::from_utf16_offset(source.content_start()),
                     text,
                     runs,
                 ));
-
-                block_start += block.node_size();
             }
 
             Ok(views)
@@ -442,18 +424,22 @@ impl Document {
     }
 
     pub(crate) fn full_selection(&self) -> Result<TextSelection, DocumentError> {
-        let start = self.initial_selection()?.head();
+        let selection = self.schema.scope(|| {
+            let blocks = text_blocks(&self.node)?;
 
-        // The current schema contains top-level paragraphs.
-        // The final paragraph's content ends before its closing boundary.
-        let end = self
-            .schema
-            .scope(|| self.node.content_size().checked_sub(1))
-            .ok_or_else(|| {
+            let first = blocks.first().ok_or_else(|| {
                 DocumentError::InvalidDocument("document contains no selectable content".to_owned())
             })?;
 
-        let selection = TextSelection::new(start, Position::from_utf16_offset(end));
+            let last = blocks
+                .last()
+                .expect("a first text block must also have a last block");
+
+            Ok(TextSelection::new(
+                Position::from_utf16_offset(first.content_start()),
+                Position::from_utf16_offset(last.content_end()),
+            ))
+        })?;
 
         self.validate_selection(selection)?;
 

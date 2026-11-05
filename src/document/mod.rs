@@ -4,6 +4,7 @@ mod model;
 mod position;
 mod schema;
 mod selection;
+mod text_block;
 mod transaction;
 mod view;
 
