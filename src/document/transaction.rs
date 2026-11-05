@@ -38,6 +38,22 @@ impl Transaction {
                 .map_err(|_| DocumentError::InvalidPosition { position: offset })
         })
     }
+
+    pub(crate) fn is_code_block_at(&self, position: Position) -> Result<bool, DocumentError> {
+        let offset = position.utf16_offset();
+
+        self.schema.scope(|| {
+            let resolved = ResolvedPos::<Dyn>::resolve(&self.transform.doc, offset)
+                .map_err(|_| DocumentError::InvalidPosition { position: offset })?;
+
+            if resolved.depth != 1 || !resolved.parent().is_textblock() {
+                return Err(DocumentError::InvalidPosition { position: offset });
+            }
+
+            Ok(TextBlockKind::from_node(resolved.parent())? == TextBlockKind::CodeBlock)
+        })
+    }
+
     pub fn insert_text(
         &mut self,
         position: Position,
@@ -57,6 +73,13 @@ impl Transaction {
         }
 
         let offset = self.validate_position(position)?;
+
+        if !marks.is_empty() && self.is_code_block_at(position)? {
+            return Err(DocumentError::TransformFailed(
+                "marked text cannot be inserted into a code block".to_owned(),
+            ));
+        }
+
         let text_node = self.schema.text_node_with_marks(text, marks)?;
         let content = Fragment::from(vec![text_node]);
         let previous_step_count = self.transform.steps.len();
@@ -107,6 +130,16 @@ impl Transaction {
         Ok(self)
     }
 
+    fn ensure_inline_formatting_allowed(
+        &self,
+        from: usize,
+        to: usize,
+    ) -> Result<(), DocumentError> {
+        self.schema.scope(|| {
+            super::text_block::ensure_inline_formatting_allowed(&self.transform.doc, from, to)
+        })
+    }
+
     pub fn add_mark(
         &mut self,
         from: Position,
@@ -121,6 +154,8 @@ impl Transaction {
                 "range start {from} is after range end {to}"
             )));
         }
+
+        self.ensure_inline_formatting_allowed(from, to)?;
 
         if from == to {
             return Ok(self);
@@ -149,6 +184,8 @@ impl Transaction {
                 "range start {from} is after range end {to}"
             )));
         }
+
+        self.ensure_inline_formatting_allowed(from, to)?;
 
         if from == to {
             return Ok(self);
@@ -203,6 +240,7 @@ impl Transaction {
                 "range start {from} is after range end {to}"
             )));
         }
+        self.ensure_inline_formatting_allowed(from, to)?;
 
         if from == to {
             return Ok(self);
@@ -230,6 +268,12 @@ impl Transaction {
 
             if !resolved.parent().is_textblock() {
                 return Err(DocumentError::InvalidPosition { position: offset });
+            }
+
+            if TextBlockKind::from_node(resolved.parent())? == TextBlockKind::CodeBlock {
+                return Err(DocumentError::TransformFailed(
+                    "code blocks cannot be split into separate blocks".to_owned(),
+                ));
             }
 
             self.transform
@@ -268,7 +312,11 @@ impl Transaction {
                 resolved.end(resolved.depth),
             ))
         })?;
+        if kind == TextBlockKind::CodeBlock {
+            self.insert_text_with_marks(position, "\n", &[])?;
 
+            return Ok(Position::from_utf16_offset(offset + 1));
+        }
         if matches!(kind, TextBlockKind::Heading { .. }) && start == end {
             self.set_text_block_kind(TextSelection::cursor(position), TextBlockKind::Paragraph)?;
 
@@ -315,7 +363,7 @@ impl Transaction {
         })
     }
 
-    pub(crate) fn clear_heading_at_start(
+    pub(crate) fn reset_text_block_at_start(
         &mut self,
         position: Position,
     ) -> Result<bool, DocumentError> {
@@ -331,11 +379,15 @@ impl Transaction {
                 ));
             }
 
-            Ok(offset == resolved.start(resolved.depth)
-                && matches!(
-                    TextBlockKind::from_node(resolved.parent())?,
-                    TextBlockKind::Heading { .. }
-                ))
+            let at_start = offset == resolved.start(resolved.depth);
+
+            let should_reset = match TextBlockKind::from_node(resolved.parent())? {
+                TextBlockKind::Heading { .. } => true,
+                TextBlockKind::CodeBlock => offset == 1 || resolved.parent().content_size() == 0,
+                TextBlockKind::Paragraph => false,
+            };
+
+            Ok(at_start && should_reset)
         })?;
 
         if !should_convert {
@@ -391,16 +443,41 @@ impl Transaction {
                 ));
             }
 
-            TextBlockKind::from_node(left)?;
-            TextBlockKind::from_node(right)?;
+            let left_kind = TextBlockKind::from_node(left)?;
+            let right_kind = TextBlockKind::from_node(right)?;
 
-            if can_join::<Dyn>(&self.transform.doc, offset) != Some(true) {
-                return Err(DocumentError::TransformFailed(format!(
-                    "paragraphs cannot be joined at position {offset}"
-                )));
+            if left_kind == TextBlockKind::CodeBlock || right_kind == TextBlockKind::CodeBlock {
+                left.check().map_err(DocumentError::InvalidDocument)?;
+                right.check().map_err(DocumentError::InvalidDocument)?;
+
+                let right_content = Self::converted_text_content(&self.schema, right, left_kind)?;
+
+                if right_content.size() != right.content_size() {
+                    return Err(DocumentError::TransformFailed(
+                        "joining must preserve converted content positions".to_owned(),
+                    ));
+                }
+
+                let replacement = left.copy(|content| content.clone().append(right_content));
+
+                replacement
+                    .check()
+                    .map_err(DocumentError::InvalidDocument)?;
+
+                let from = offset - left.node_size();
+                let to = offset + right.node_size();
+
+                self.transform
+                    .replace_with(from, to, Fragment::from(vec![replacement]));
+            } else {
+                if can_join::<Dyn>(&self.transform.doc, offset) != Some(true) {
+                    return Err(DocumentError::TransformFailed(format!(
+                        "paragraphs cannot be joined at position {offset}"
+                    )));
+                }
+
+                self.transform.join(offset, Some(1));
             }
-
-            self.transform.join(offset, Some(1));
 
             if self.transform.steps.len() == previous_step_count {
                 return Err(DocumentError::TransformFailed(format!(
@@ -430,11 +507,20 @@ impl Transaction {
 
         self.delete_range(from, to)?;
 
+        if self.is_code_block_at(from)? {
+            self.insert_text_with_marks(from, &normalized, &[])?;
+
+            return Ok(Position::from_utf16_offset(
+                from.utf16_offset() + normalized.encode_utf16().count(),
+            ));
+        }
+
         let mut cursor = from;
 
         for (index, part) in normalized.split('\n').enumerate() {
             if index > 0 {
                 self.split_paragraph(cursor)?;
+
                 cursor = Position::from_utf16_offset(cursor.utf16_offset() + 2);
             }
 
@@ -447,6 +533,50 @@ impl Transaction {
         Ok(cursor)
     }
 
+    fn converted_text_content(
+        schema: &DocumentSchema,
+        node: &DynamicNode,
+        kind: TextBlockKind,
+    ) -> Result<Fragment<Dyn>, DocumentError> {
+        let mut text = String::new();
+
+        for index in 0..node.child_count() {
+            let child = node.maybe_child(index).ok_or_else(|| {
+                DocumentError::InvalidDocument("text block child is missing".to_owned())
+            })?;
+
+            if child.is_text() {
+                text.push_str(&child.text_content());
+            } else if child.r#type().name() == "hard_break" {
+                text.push('\n');
+            } else {
+                return Err(DocumentError::InvalidDocument(
+                    "block conversion encountered unsupported inline content".to_owned(),
+                ));
+            }
+        }
+
+        let mut children = Vec::new();
+
+        if kind == TextBlockKind::CodeBlock {
+            if !text.is_empty() {
+                children.push(schema.text_node_with_marks(&text, &[])?);
+            }
+        } else {
+            for (index, part) in text.split('\n').enumerate() {
+                if index > 0 {
+                    children.push(schema.hard_break_node()?);
+                }
+
+                if !part.is_empty() {
+                    children.push(schema.text_node_with_marks(part, &[])?);
+                }
+            }
+        }
+
+        Ok(Fragment::from(children))
+    }
+
     pub(crate) fn set_text_block_kind(
         &mut self,
         selection: TextSelection,
@@ -456,10 +586,14 @@ impl Transaction {
         let to = self.validate_position(selection.to())?;
 
         let attrs = match kind {
-            TextBlockKind::Paragraph => serde_json::json!({}),
+            TextBlockKind::Paragraph | TextBlockKind::CodeBlock => {
+                serde_json::json!({})
+            }
             TextBlockKind::Heading { level } => {
                 TextBlockKind::heading(level)?;
-                serde_json::json!({ "level": level })
+                serde_json::json!({
+                    "level": level
+                })
             }
         };
 
@@ -469,16 +603,7 @@ impl Transaction {
             let mut selected = false;
 
             for source in text_blocks(&self.transform.doc)? {
-                let start = source.content_start();
-                let end = source.content_end();
-
-                let overlaps = if selection.is_empty() {
-                    start <= from && from <= end
-                } else {
-                    end >= from && start < to
-                };
-
-                if !overlaps {
+                if !source.is_touched_by(from, to) {
                     continue;
                 }
 
@@ -490,24 +615,59 @@ impl Transaction {
 
                 selected = true;
 
-                if TextBlockKind::from_node(source.node)? != kind {
-                    targets.push(source.before());
+                let source_kind = TextBlockKind::from_node(source.node)?;
+
+                source
+                    .node
+                    .check()
+                    .map_err(DocumentError::InvalidDocument)?;
+
+                if source_kind == kind {
+                    continue;
                 }
+
+                let replacement = if source_kind == TextBlockKind::CodeBlock
+                    || kind == TextBlockKind::CodeBlock
+                {
+                    let content = Self::converted_text_content(&self.schema, source.node, kind)?;
+
+                    let node =
+                        target_type.create(attrs.clone(), Some(&content), source.node.marks());
+
+                    node.check().map_err(DocumentError::InvalidDocument)?;
+
+                    if node.node_size() != source.node.node_size() {
+                        return Err(DocumentError::TransformFailed(
+                            "block conversion must preserve content positions".to_owned(),
+                        ));
+                    }
+
+                    Some(node)
+                } else {
+                    None
+                };
+
+                targets.push((source.before(), source.node.node_size(), replacement));
             }
 
             if !selected {
                 return Err(DocumentError::InvalidPosition { position: from });
             }
 
-            for before in targets {
+            for (before, size, replacement) in targets {
                 let previous = self.transform.steps.len();
 
-                self.transform.set_node_markup(
-                    before,
-                    Some(target_type),
-                    Some(attrs.clone()),
-                    None,
-                );
+                if let Some(node) = replacement {
+                    self.transform
+                        .replace_with(before, before + size, Fragment::from(vec![node]));
+                } else {
+                    self.transform.set_node_markup(
+                        before,
+                        Some(target_type),
+                        Some(attrs.clone()),
+                        None,
+                    );
+                }
 
                 if self.transform.steps.len() == previous {
                     return Err(DocumentError::TransformFailed(format!(
@@ -589,5 +749,89 @@ impl DocumentChange {
 
     pub(crate) fn apply_inverse(&self, document: &Document) -> Result<Document, DocumentError> {
         self.apply_steps(document, &self.inverse)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::document::{Document, Mark, Position};
+
+    fn empty_code() -> Document {
+        Document::from_json(
+            r#"{
+                   "type": "doc",
+                   "content": [
+                       {
+                           "type": "code_block"
+                       }
+                   ]
+               }"#,
+        )
+        .expect("valid code document")
+    }
+
+    #[test]
+    fn marked_text_insertion_into_code_is_rejected_without_steps() {
+        let document = empty_code();
+
+        let original = document.to_json().expect("serialize document");
+
+        let mut transaction = document.transaction();
+
+        assert!(
+            transaction
+                .insert_text_with_marks(Position::from_utf16_offset(1), "x", &[Mark::Strong],)
+                .is_err()
+        );
+
+        let result = transaction.finish();
+
+        assert!(result.change.is_none());
+
+        assert_eq!(
+            result.document.to_json().expect("serialize document"),
+            original
+        );
+    }
+
+    #[test]
+    fn plain_text_replacement_in_code_ignores_requested_marks() {
+        let document = empty_code();
+        let mut transaction = document.transaction();
+
+        let cursor = transaction
+            .replace_plain_text(
+                Position::from_utf16_offset(1),
+                Position::from_utf16_offset(1),
+                "A\r\nB",
+                &[Mark::Strong, Mark::Emphasis],
+            )
+            .expect("replace code text");
+
+        assert_eq!(cursor, Position::from_utf16_offset(4));
+
+        let result = transaction.commit().to_json().expect("serialize document");
+
+        let actual: serde_json::Value = serde_json::from_str(&result).expect("valid JSON");
+
+        assert_eq!(
+            actual,
+            serde_json::json!({
+                "type": "doc",
+                "content": [
+                    {
+                        "type": "code_block",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "A\nB"
+                            }
+                        ]
+                    }
+                ]
+            })
+        );
+
+        Document::from_json(&result).expect("result satisfies schema");
     }
 }

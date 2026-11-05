@@ -1,7 +1,7 @@
-#[cfg(all(test, feature = "renderer-tests"))]
-mod cache_tests;
 mod ime;
 mod paste;
+#[cfg(all(test, feature = "renderer-tests"))]
+mod renderer_tests;
 mod state;
 
 use iced::{
@@ -99,7 +99,9 @@ fn paragraph_text(content: &str, width: f32, font: Font) -> text::Text<&str> {
 
 fn rich_paragraph_text(view: &ParagraphView, width: f32, font: Font) -> text::Text<&str> {
     let mut descriptor = paragraph_text(view.text(), width, font);
-
+    if view.kind() == TextBlockKind::CodeBlock {
+        descriptor.font.family = Font::MONOSPACE.family;
+    }
     if let TextBlockKind::Heading { level } = view.kind() {
         let size = match level {
             1 => 32.0,
@@ -160,7 +162,9 @@ fn make_rich_paragraph(
     link_color: Color,
 ) -> Paragraph {
     let descriptor = rich_paragraph_text(view, width, base_font);
-
+    if view.kind() == TextBlockKind::CodeBlock {
+        return Paragraph::with_text(descriptor);
+    }
     let spans: Vec<text::Span<'_>> = view
         .marked_fragments()
         .map(|(fragment, marks)| span_for_marks(fragment, marks, descriptor.font, link_color))
@@ -436,11 +440,15 @@ where
                         },
                         None => make_rich_paragraph(&view, content_width, font, self.link_color),
                     };
-
                     let minimum_height = view.line_count() as f32 * line_height;
 
-                    let height = paragraph.min_height().max(minimum_height);
+                    let trailing_height = state::trailing_empty_line(&paragraph, &view)
+                        .map_or(0.0, |(_, bounds)| bounds.y + bounds.height);
 
+                    let height = paragraph
+                        .min_height()
+                        .max(minimum_height)
+                        .max(trailing_height);
                     state.paragraphs.push(LaidOutParagraph {
                         paragraph,
                         origin: Point::new(PADDING, y),
@@ -565,7 +573,11 @@ where
                 ..palette.background.base.text
             };
 
-            for rectangle in state.code_background_bounds() {
+            for rectangle in state
+                .code_block_background_bounds(content_bounds.width)
+                .into_iter()
+                .chain(state.code_background_bounds())
+            {
                 let background = Rectangle {
                     x: bounds.x + rectangle.x,
                     y: bounds.y + rectangle.y - state.scroll_y,

@@ -10,6 +10,7 @@ use super::DocumentError;
 pub(crate) enum TextBlockKind {
     Paragraph,
     Heading { level: u8 },
+    CodeBlock,
 }
 
 impl TextBlockKind {
@@ -26,6 +27,7 @@ impl TextBlockKind {
     pub(super) fn from_node(node: &DynamicNode) -> Result<Self, DocumentError> {
         match node.r#type().name() {
             "paragraph" => Ok(Self::Paragraph),
+            "code_block" => Ok(Self::CodeBlock),
             "heading" => {
                 let level = node
                     .attrs_json()
@@ -45,6 +47,24 @@ impl TextBlockKind {
             )),
         }
     }
+}
+
+pub(super) fn ensure_inline_formatting_allowed(
+    root: &DynamicNode,
+    from: usize,
+    to: usize,
+) -> Result<(), DocumentError> {
+    for source in text_blocks(root)? {
+        if source.is_touched_by(from, to)
+            && TextBlockKind::from_node(source.node)? == TextBlockKind::CodeBlock
+        {
+            return Err(DocumentError::TransformFailed(
+                "inline formatting is not allowed in code blocks".to_owned(),
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 /// A borrowed text block and its actual location in the document tree.
@@ -67,6 +87,15 @@ impl TextBlockSource<'_> {
 
     pub(super) fn before(&self) -> usize {
         self.before
+    }
+
+    /// Includes a cursor, but excludes a block starting at a nonempty range's end.
+    pub(super) fn is_touched_by(&self, from: usize, to: usize) -> bool {
+        if from == to {
+            self.content_start() <= from && from <= self.content_end()
+        } else {
+            self.content_end() >= from && self.content_start() < to
+        }
     }
 }
 

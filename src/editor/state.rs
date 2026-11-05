@@ -138,12 +138,11 @@ impl EditorState {
                 .map_err(EditorError::Document)?,
         };
 
-        let marks = self
+        let mut marks = self
             .document
             .normalize_marks(&marks)
             .map_err(EditorError::Document)?;
 
-        let stored_marks = self.stored_marks.clone();
         let mut transaction = self.document.transaction();
 
         if !is_cursor_input {
@@ -152,11 +151,25 @@ impl EditorState {
                 .map_err(EditorError::Document)?;
         }
 
+        let in_code = transaction
+            .is_code_block_at(from)
+            .map_err(EditorError::Document)?;
+
+        if in_code {
+            marks.clear();
+        }
+
         transaction
             .insert_text_with_marks(from, text, &marks)
             .map_err(EditorError::Document)?;
 
         let cursor = Position::from_utf16_offset(from.utf16_offset() + text.encode_utf16().count());
+
+        let stored_marks = if in_code {
+            None
+        } else {
+            self.stored_marks.clone()
+        };
 
         let input = if is_cursor_input {
             Some((marks, now))
@@ -168,6 +181,9 @@ impl EditorState {
     }
 
     pub fn toggle_mark(&mut self, mark: Mark) -> Result<(), EditorError> {
+        self.document
+            .ensure_inline_formatting_allowed(self.selection)
+            .map_err(EditorError::Document)?;
         if !self.selection.is_empty() {
             let selection = self.selection;
 
@@ -215,6 +231,9 @@ impl EditorState {
     }
 
     pub fn set_link(&mut self, href: String, title: Option<String>) -> Result<(), EditorError> {
+        self.document
+            .ensure_inline_formatting_allowed(self.selection)
+            .map_err(EditorError::Document)?;
         let mark = Mark::Link { href, title };
 
         if self.selection.is_empty() {
@@ -249,6 +268,9 @@ impl EditorState {
     }
 
     pub fn remove_link(&mut self) -> Result<(), EditorError> {
+        self.document
+            .ensure_inline_formatting_allowed(self.selection)
+            .map_err(EditorError::Document)?;
         if self.selection.is_empty() {
             let mut marks = match &self.stored_marks {
                 Some(marks) => marks.clone(),
@@ -433,7 +455,7 @@ impl EditorState {
 
         if !forward
             && transaction
-                .clear_heading_at_start(current)
+                .reset_text_block_at_start(current)
                 .map_err(EditorError::Document)?
         {
             return self.dispatch_cursor_edit(transaction.finish(), current, None, None);
@@ -597,12 +619,20 @@ impl EditorState {
             .normalize_marks(&marks)
             .map_err(EditorError::Document)?;
 
-        let stored_marks = self.stored_marks.clone();
         let mut transaction = self.document.transaction();
 
         let cursor = transaction
             .replace_plain_text(from, to, text, &marks)
             .map_err(EditorError::Document)?;
+
+        let stored_marks = if transaction
+            .is_code_block_at(cursor)
+            .map_err(EditorError::Document)?
+        {
+            None
+        } else {
+            self.stored_marks.clone()
+        };
 
         self.dispatch_cursor_edit(transaction.finish(), cursor, stored_marks, None)
     }
@@ -730,7 +760,10 @@ impl EditorState {
     pub fn is_composition_context_current(&self, context: &CompositionContext) -> bool {
         self.composition_context.matches(context)
     }
-
+    /// Converts selected text blocks to unmarked code blocks.
+    pub fn set_code_block(&mut self) -> Result<(), EditorError> {
+        self.set_text_block_kind(TextBlockKind::CodeBlock)
+    }
     /// Converts selected text blocks to headings as one history event.
     pub fn set_heading(&mut self, level: u8) -> Result<(), EditorError> {
         let kind = TextBlockKind::heading(level).map_err(EditorError::Document)?;
@@ -750,11 +783,13 @@ impl EditorState {
             .set_text_block_kind(self.selection, kind)
             .map_err(EditorError::Document)?;
 
-        self.dispatch_transaction(
-            transaction.finish(),
-            self.selection,
-            self.stored_marks.clone(),
-        )
+        let stored_marks = if kind == TextBlockKind::CodeBlock {
+            None
+        } else {
+            self.stored_marks.clone()
+        };
+
+        self.dispatch_transaction(transaction.finish(), self.selection, stored_marks)
     }
 }
 
@@ -2712,6 +2747,50 @@ mod tests {
         state.undo().expect("undo must succeed");
 
         assert_eq!(state.document().text(), "");
+        assert!(!state.can_undo());
+    }
+
+    #[test]
+    fn code_typing_groups_but_enter_and_composition_are_separate_history_events() {
+        let document = Document::from_json(
+            r#"{
+               "type": "doc",
+               "content": [
+                   {
+                       "type": "code_block"
+                   }
+               ]
+           }"#,
+        )
+        .expect("valid code document");
+
+        let mut state = EditorState::new(document).expect("valid editor");
+
+        let now = Instant::now();
+
+        state.insert_text_at("A", now).expect("type A");
+
+        state
+            .insert_text_at("B", now + Duration::from_millis(1))
+            .expect("type B");
+
+        state.split_paragraph().expect("Enter");
+
+        state
+            .commit_composition("中\n")
+            .expect("commit composition");
+
+        state
+            .insert_text_at("C", now + Duration::from_millis(2))
+            .expect("type C");
+
+        assert_eq!(state.document().text(), "AB\n中\nC");
+
+        for expected in ["AB\n中\n", "AB\n", "AB", ""] {
+            state.undo().expect("undo event");
+            assert_eq!(state.document().text(), expected);
+        }
+
         assert!(!state.can_undo());
     }
 }

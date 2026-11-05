@@ -24,6 +24,7 @@ enum Message {
     SetLink,
     SetHeading(u8),
     SetParagraph,
+    SetCodeBlock,
     RemoveLink,
 }
 
@@ -201,6 +202,47 @@ impl Basic {
         let content = value["content"]
             .as_array_mut()
             .expect("the built-in example must contain a content array");
+        content.extend([
+            serde_json::json!({
+                "type": "paragraph",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Code block: Enter inserts a newline; Backspace at a nonempty block start joins the previous block."
+                    }
+                ]
+            }),
+            serde_json::json!({
+                "type": "code_block",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "fn main() {\n    let greeting = \"Hello, 😀\";\n\n    println!(\"{greeting}\");\n}\n"
+                    }
+                ]
+            }),
+            serde_json::json!({
+                "type": "paragraph",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "The next block is empty code. Enter stays in code; use Body or start-of-block Backspace to exit."
+                    }
+                ]
+            }),
+            serde_json::json!({
+                "type": "code_block"
+            }),
+            serde_json::json!({
+                "type": "paragraph",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Paragraph after code. Inline formatting in code is rejected; boundary deletion joins supported text blocks."
+                    }
+                ]
+            }),
+        ]);
 
         for index in 1..=20 {
             content.push(serde_json::json!({
@@ -238,6 +280,7 @@ impl Basic {
                 .set_link("https://iced.rs/".to_owned(), Some("iced".to_owned())),
             Message::SetHeading(level) => self.editor.set_heading(level),
             Message::SetParagraph => self.editor.set_paragraph(),
+            Message::SetCodeBlock => self.editor.set_code_block(),
             Message::RemoveLink => self.editor.remove_link(),
         };
 
@@ -273,7 +316,7 @@ impl Basic {
             button("Bold").on_press(Message::ToggleStrong),
             button("Italic").on_press(Message::ToggleEmphasis),
             button("Underline").on_press(Message::ToggleUnderline),
-            button("Code").on_press(Message::ToggleCode),
+            button("Inline Code").on_press(Message::ToggleCode),
             button("Set link").on_press(Message::SetLink),
             button("Remove link").on_press(Message::RemoveLink),
         ]
@@ -281,15 +324,16 @@ impl Basic {
         let blocks = row![
             button("H1").on_press(Message::SetHeading(1)),
             button("H2").on_press(Message::SetHeading(2)),
+            button("Code Block").on_press(Message::SetCodeBlock),
             button("Body").on_press(Message::SetParagraph),
         ]
         .spacing(8);
         let status = self.error.as_deref().unwrap_or(
-            "Select text and use Bold or Italic to change formatting. \
-        Type to replace the selection. Try undo/redo, clipboard operations, \
-        and IME input. Platform and input method coverage is limited.",
+            "Use H1, H2, Body, or Code block to change block type. \
+       Inline formatting is unavailable in code blocks. \
+       Try undo/redo, clipboard operations, and IME input. \
+       Platform and input method coverage is limited.",
         );
-
         container(
             column![
                 text("Rich editor: action dispatch"),

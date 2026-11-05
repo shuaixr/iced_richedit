@@ -1,5 +1,5 @@
 use crate::{
-    document::{ParagraphView, Position, TextPosition, TextSelection},
+    document::{ParagraphView, Position, TextBlockKind, TextPosition, TextSelection},
     widget::{ime::ImeState, paste::PasteState},
 };
 
@@ -11,6 +11,38 @@ use iced::{
     },
 };
 use unicode_segmentation::UnicodeSegmentation;
+
+const CARET_WIDTH: f32 = 1.5;
+
+/// Supplies the final empty row omitted by the pinned rich-text shaping path.
+/// Its geometry comes from the preceding actual layout run, without extra text.
+pub(super) fn trailing_empty_line(
+    paragraph: &Paragraph,
+    view: &ParagraphView,
+) -> Option<(usize, Rectangle)> {
+    let line = view.line_count().checked_sub(1)?;
+
+    if !view.line_text(line)?.is_empty() {
+        return None;
+    }
+
+    let previous = paragraph.buffer().layout_runs().last()?;
+
+    if previous.line_i.checked_add(1)? != line {
+        return None;
+    }
+
+    Some((
+        line,
+        Rectangle {
+            x: 0.0,
+            y: previous.line_top + previous.line_height,
+            width: CARET_WIDTH,
+            height: previous.line_height,
+        },
+    ))
+}
+
 pub(super) struct LaidOutParagraph {
     pub(super) paragraph: Paragraph,
     pub(super) origin: Point,
@@ -115,8 +147,13 @@ impl State {
 
         let local = Point::new(position.x - item.origin.x, position.y - item.origin.y);
 
-        let cursor = item.paragraph.buffer().hit(local.x, local.y)?;
+        if let Some((line, bounds)) = item.trailing_empty_line()
+            && position.y >= bounds.y
+        {
+            return view.document_position(TextPosition { line, byte: 0 });
+        }
 
+        let cursor = item.paragraph.buffer().hit(local.x, local.y)?;
         view.document_position(TextPosition {
             line: cursor.line,
             byte: cursor.index,
@@ -283,6 +320,26 @@ impl State {
         target.map(|(position, affinity, _)| (position, affinity))
     }
 
+    pub(super) fn code_block_background_bounds(&self, content_width: f32) -> Vec<Rectangle> {
+        if self.has_error {
+            return Vec::new();
+        }
+
+        self.paragraphs
+            .iter()
+            .filter_map(|item| {
+                let view = item.view.as_ref()?;
+
+                (view.kind() == TextBlockKind::CodeBlock).then_some(Rectangle {
+                    x: item.origin.x,
+                    y: item.origin.y,
+                    width: content_width,
+                    height: item.height,
+                })
+            })
+            .collect()
+    }
+
     pub(super) fn code_background_bounds(&self) -> Vec<Rectangle> {
         if self.has_error {
             return Vec::new();
@@ -364,7 +421,7 @@ impl LaidOutParagraph {
                     return (text_position.byte == 0).then_some(Rectangle {
                         x: self.origin.x,
                         y: self.origin.y + run.line_top,
-                        width: 1.5,
+                        width: CARET_WIDTH,
                         height: run.line_height,
                     });
                 }
@@ -416,10 +473,13 @@ impl LaidOutParagraph {
                 Some(Rectangle {
                     x: self.origin.x + x,
                     y: self.origin.y + run.line_top,
-                    width: 1.5,
+                    width: CARET_WIDTH,
                     height: run.line_height,
                 })
             })
+            .chain(self.trailing_empty_line().and_then(|(line, bounds)| {
+                (text_position == Some(TextPosition { line, byte: 0 })).then_some(bounds)
+            }))
     }
     fn selection_bounds(&self, selection: TextSelection) -> Vec<Rectangle> {
         let Some(view) = &self.view else {
@@ -488,6 +548,14 @@ impl LaidOutParagraph {
                     height: run.line_height,
                 });
             }
+        }
+        if let Some((line, mut bounds)) = self.trailing_empty_line()
+            && view
+                .document_position(TextPosition { line, byte: 0 })
+                .is_some_and(|line_end| selection.from() <= line_end && selection.to() > line_end)
+        {
+            bounds.width = 3.0;
+            rectangles.push(bounds);
         }
 
         rectangles
@@ -635,6 +703,15 @@ impl LaidOutParagraph {
         };
 
         self.text_range_bounds(from, to)
+    }
+
+    fn trailing_empty_line(&self) -> Option<(usize, Rectangle)> {
+        let (line, mut bounds) = trailing_empty_line(&self.paragraph, self.view.as_ref()?)?;
+
+        bounds.x += self.origin.x;
+        bounds.y += self.origin.y;
+
+        Some((line, bounds))
     }
 }
 

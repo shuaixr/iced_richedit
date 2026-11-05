@@ -125,6 +125,7 @@ impl DocumentSchema {
         let name = match kind {
             TextBlockKind::Paragraph => "paragraph",
             TextBlockKind::Heading { .. } => "heading",
+            TextBlockKind::CodeBlock => "code_block",
         };
 
         self.scope(|| {
@@ -140,12 +141,24 @@ impl DocumentSchema {
 
         Ok(Self { inner })
     }
+
+    pub(super) fn hard_break_node(&self) -> Result<DynamicNode, DocumentError> {
+        self.scope(|| {
+            let node_type = self.inner.node_type("hard_break").ok_or_else(|| {
+                DocumentError::InvalidSchema("schema must define the hard_break node".to_owned())
+            })?;
+
+            Ok(node_type.create_node(None, None))
+        })
+    }
 }
 
 fn schema_spec() -> serde_json::Value {
     serde_json::json!({
         "nodes": {
-            "doc": { "content": "block+" },
+            "doc": {
+                "content": "block+"
+            },
             "paragraph": {
                 "content": "inline*",
                 "group": "block"
@@ -154,7 +167,9 @@ fn schema_spec() -> serde_json::Value {
                 "content": "inline*",
                 "group": "block",
                 "attrs": {
-                    "level": { "default": 1 }
+                    "level": {
+                        "default": 1
+                    }
                 }
             },
             "text": {
@@ -163,6 +178,13 @@ fn schema_spec() -> serde_json::Value {
             "hard_break": {
                 "inline": true,
                 "group": "inline"
+            },
+            "code_block": {
+                "content": "text*",
+                "group": "block",
+                "marks": "",
+                "code": true,
+                "whitespace": "pre"
             }
         },
         "marks": {
@@ -173,7 +195,9 @@ fn schema_spec() -> serde_json::Value {
             "link": {
                 "attrs": {
                     "href": {},
-                    "title": { "default": null }
+                    "title": {
+                        "default": null
+                    }
                 },
                 "inclusive": false
             }
@@ -399,5 +423,62 @@ mod tests {
             ]),
             4,
         );
+    }
+
+    #[test]
+    fn code_joining_rejects_isolating_atomic_and_unsupported_neighbors_without_changes() {
+        let code = serde_json::json!({
+            "type": "code_block",
+            "content": [
+                { "type": "text", "text": "A" }
+            ]
+        });
+
+        let paragraph = serde_json::json!({
+            "type": "paragraph",
+            "content": [
+                { "type": "text", "text": "B" }
+            ]
+        });
+
+        let mut spec = super::schema_spec();
+
+        spec["nodes"]["code_block"]["isolating"] = serde_json::json!(true);
+
+        for content in [
+            serde_json::json!([code, paragraph]),
+            serde_json::json!([paragraph, code]),
+        ] {
+            assert_join_rejected(spec.clone(), content, 3);
+        }
+
+        spec["nodes"]["code_block"]["isolating"] = serde_json::json!(false);
+
+        spec["nodes"]["atomic_text"] = serde_json::json!({
+            "group": "block",
+            "content": "text*",
+            "atom": true
+        });
+
+        spec["nodes"]["custom_text"] = serde_json::json!({
+            "group": "block",
+            "content": "text*"
+        });
+
+        for kind in ["atomic_text", "custom_text"] {
+            let neighbor = serde_json::json!({
+                "type": kind,
+                "content": [
+                    { "type": "text", "text": "B" }
+                ]
+            });
+
+            for content in [
+                serde_json::json!([code, neighbor]),
+                serde_json::json!([neighbor, code]),
+            ] {
+                assert_join_rejected(spec.clone(), content, 3);
+            }
+        }
     }
 }

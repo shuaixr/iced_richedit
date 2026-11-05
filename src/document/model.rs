@@ -621,6 +621,21 @@ impl Document {
 
         Ok(views)
     }
+
+    pub(crate) fn ensure_inline_formatting_allowed(
+        &self,
+        selection: TextSelection,
+    ) -> Result<(), DocumentError> {
+        self.validate_selection(selection)?;
+
+        self.schema.scope(|| {
+            super::text_block::ensure_inline_formatting_allowed(
+                &self.node,
+                selection.from().utf16_offset(),
+                selection.to().utf16_offset(),
+            )
+        })
+    }
 }
 
 #[cfg(test)]
@@ -817,5 +832,57 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn code_composition_projection_ignores_requested_marks_without_mutating_document() {
+        use crate::document::{TextBlockKind, TextPosition, TextSelection};
+
+        let document = Document::from_json(
+            &serde_json::json!({
+                "type": "doc",
+                "content": [
+                    {
+                        "type": "code_block",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "AB"
+                            }
+                        ]
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .expect("valid document");
+
+        let original = document.to_json().expect("serialize document");
+
+        let selection = TextSelection::new(
+            Position::from_utf16_offset(3),
+            Position::from_utf16_offset(2),
+        );
+
+        let views = document
+            .composition_paragraph_views(selection, "中", Some(3), Some(&[Mark::Strong]))
+            .expect("composition projection");
+
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].kind(), TextBlockKind::CodeBlock);
+        assert_eq!(views[0].text(), "A中");
+
+        assert!(
+            views[0]
+                .marked_fragments()
+                .all(|(_, marks)| marks.is_empty())
+        );
+
+        assert_eq!(
+            views[0].text_position(selection.head()),
+            Some(TextPosition { line: 0, byte: 4 })
+        );
+
+        assert_eq!(document.to_json().expect("serialize document"), original);
     }
 }

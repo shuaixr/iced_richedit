@@ -372,23 +372,26 @@ impl ParagraphView {
                 Position::from_utf16_offset(last.start.utf16_offset() + utf16),
             ));
         }
-
         let mut runs = Vec::new();
 
-        append_clipped_runs(&mut runs, &first.runs, 0..prefix_end, 0);
+        if first.kind == TextBlockKind::CodeBlock && first.start == last.start {
+            append_text_run(&mut runs, 0..text.len(), &[]);
+        } else {
+            append_clipped_runs(&mut runs, &first.runs, 0..prefix_end, 0);
 
-        append_text_run(
-            &mut runs,
-            prefix.len()..prefix.len() + preedit.len(),
-            preedit_marks,
-        );
+            append_text_run(
+                &mut runs,
+                prefix.len()..prefix.len() + preedit.len(),
+                preedit_marks,
+            );
 
-        append_clipped_runs(
-            &mut runs,
-            &last.runs,
-            suffix_start..last.text.len(),
-            prefix.len() + preedit.len(),
-        );
+            append_clipped_runs(
+                &mut runs,
+                &last.runs,
+                suffix_start..last.text.len(),
+                prefix.len() + preedit.len(),
+            );
+        }
 
         let lines = logical_lines(&text);
 
@@ -780,5 +783,76 @@ mod tests {
 
         assert_eq!(composed.text(), "CB");
         assert_eq!(composed.kind(), TextBlockKind::Heading { level: 2 });
+    }
+
+    #[test]
+    fn code_block_projection_maps_utf16_positions_across_empty_and_trailing_lines() {
+        let text = "A😀\n\nB\n".to_owned();
+        let mut runs = Vec::new();
+
+        super::append_text_run(&mut runs, 0..text.len(), &[]);
+
+        let view = ParagraphView::with_runs(
+            Position::from_utf16_offset(1),
+            text,
+            runs,
+            TextBlockKind::CodeBlock,
+        );
+
+        assert_eq!(view.line_count(), 4);
+
+        for (offset, line, byte) in [
+            (1, 0, 0),
+            (2, 0, 1),
+            (4, 0, 5),
+            (5, 1, 0),
+            (6, 2, 0),
+            (7, 2, 1),
+            (8, 3, 0),
+        ] {
+            let position = Position::from_utf16_offset(offset);
+            let display = TextPosition { line, byte };
+
+            assert_eq!(view.text_position(position), Some(display));
+            assert_eq!(view.document_position(display), Some(position));
+        }
+
+        assert_eq!(view.text_position(Position::from_utf16_offset(3)), None);
+    }
+
+    #[test]
+    fn composition_preserves_code_block_kind_and_unmarked_fragments() {
+        use crate::document::TextSelection;
+
+        let mut runs = Vec::new();
+        super::append_text_run(&mut runs, 0..2, &[]);
+
+        let original = ParagraphView::with_runs(
+            Position::from_utf16_offset(1),
+            "AB".to_owned(),
+            runs,
+            TextBlockKind::CodeBlock,
+        );
+
+        let composed = ParagraphView::compose(
+            &original,
+            &original,
+            TextSelection::new(
+                Position::from_utf16_offset(1),
+                Position::from_utf16_offset(2),
+            ),
+            "中",
+            Some(0),
+            &[],
+        )
+        .expect("composition projection");
+
+        assert_eq!(composed.kind(), TextBlockKind::CodeBlock);
+        assert_eq!(composed.text(), "中B");
+        assert!(
+            composed
+                .marked_fragments()
+                .all(|(_, marks)| marks.is_empty())
+        );
     }
 }
