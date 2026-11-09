@@ -748,7 +748,6 @@ where
                 && !state.has_error
                 && self.on_action.is_some()
                 && state.caret_blink.is_visible()
-                && (selection.is_empty() || state.ime.preedit().is_some())
                 && state
                     .ime
                     .preedit()
@@ -1191,8 +1190,7 @@ where
                     && !state.window_unfocused
                     && !state.has_error
                     && self.on_action.is_some()
-                    && visible_viewport
-                    && (self.editor.selection().is_empty() || composing);
+                    && visible_viewport;
 
                 if let Some(deadline) =
                     state
