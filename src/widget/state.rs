@@ -161,6 +161,10 @@ impl State {
     }
 
     pub(super) fn caret_bounds(&self, position: Position) -> Option<Rectangle> {
+        self.caret_location(position).map(|(_, bounds)| bounds)
+    }
+
+    fn caret_location(&self, position: Position) -> Option<(usize, Rectangle)> {
         if self.has_error {
             return None;
         }
@@ -171,12 +175,18 @@ impl State {
             .map(|(_, affinity)| affinity)
             .unwrap_or(CaretAffinity::Downstream);
 
-        self.paragraphs.iter().find_map(|item| match affinity {
-            CaretAffinity::Upstream => item.caret_candidates(position).next(),
-            CaretAffinity::Downstream => item.caret_bounds(position),
-        })
-    }
+        self.paragraphs
+            .iter()
+            .enumerate()
+            .find_map(|(index, item)| {
+                let bounds = match affinity {
+                    CaretAffinity::Upstream => item.caret_candidates(position).next(),
+                    CaretAffinity::Downstream => item.caret_bounds(position),
+                };
 
+                bounds.map(|bounds| (index, bounds))
+            })
+    }
     pub(super) fn selection_bounds(&self, selection: TextSelection) -> Vec<Rectangle> {
         if self.has_error || selection.is_empty() {
             return Vec::new();
@@ -279,47 +289,27 @@ impl State {
         down: bool,
         preferred_x: f32,
     ) -> Option<(Position, CaretAffinity)> {
-        let current = self.caret_bounds(position)?;
+        let (current_index, current) = self.caret_location(position)?;
 
-        let mut target: Option<(Position, CaretAffinity, Rectangle)> = None;
-
-        for (candidate, affinity, bounds) in
-            self.paragraphs.iter().flat_map(|item| item.visual_carets())
+        if let Some(target) =
+            self.paragraphs[current_index].vertical_target(current.y, down, preferred_x)
         {
-            let in_direction = if down {
-                bounds.y > current.y
-            } else {
-                bounds.y < current.y
-            };
-
-            if !in_direction {
-                continue;
-            }
-
-            let replace = match target {
-                None => true,
-                Some((_, _, previous)) => {
-                    let nearer_row = if down {
-                        bounds.y < previous.y
-                    } else {
-                        bounds.y > previous.y
-                    };
-
-                    let nearer_x = bounds.y == previous.y
-                        && (bounds.x - preferred_x).abs() < (previous.x - preferred_x).abs();
-
-                    nearer_row || nearer_x
-                }
-            };
-
-            if replace {
-                target = Some((candidate, affinity, bounds));
-            }
+            return Some(target);
         }
 
-        target.map(|(position, affinity, _)| (position, affinity))
+        // Layout places paragraphs in non-overlapping vertical order.
+        // The first paragraph with a candidate contains the nearest row.
+        if down {
+            self.paragraphs[current_index + 1..]
+                .iter()
+                .find_map(|item| item.vertical_target(current.y, down, preferred_x))
+        } else {
+            self.paragraphs[..current_index]
+                .iter()
+                .rev()
+                .find_map(|item| item.vertical_target(current.y, down, preferred_x))
+        }
     }
-
     pub(super) fn code_block_background_bounds(&self, content_width: f32) -> Vec<Rectangle> {
         if self.has_error {
             return Vec::new();
@@ -394,6 +384,49 @@ impl State {
 }
 
 impl LaidOutParagraph {
+    fn vertical_target(
+        &self,
+        current_y: f32,
+        down: bool,
+        preferred_x: f32,
+    ) -> Option<(Position, CaretAffinity)> {
+        let mut target: Option<(Position, CaretAffinity, Rectangle)> = None;
+
+        for (candidate, affinity, bounds) in self.visual_carets() {
+            let in_direction = if down {
+                bounds.y > current_y
+            } else {
+                bounds.y < current_y
+            };
+
+            if !in_direction {
+                continue;
+            }
+
+            let replace = match target {
+                None => true,
+                Some((_, _, previous)) => {
+                    let nearer_row = if down {
+                        bounds.y < previous.y
+                    } else {
+                        bounds.y > previous.y
+                    };
+
+                    let nearer_x = bounds.y == previous.y
+                        && (bounds.x - preferred_x).abs() < (previous.x - preferred_x).abs();
+
+                    nearer_row || nearer_x
+                }
+            };
+
+            if replace {
+                target = Some((candidate, affinity, bounds));
+            }
+        }
+
+        target.map(|(position, affinity, _)| (position, affinity))
+    }
+
     fn caret_bounds(&self, position: Position) -> Option<Rectangle> {
         // Preserve the existing downstream preference at soft wraps.
         self.caret_candidates(position).last()
