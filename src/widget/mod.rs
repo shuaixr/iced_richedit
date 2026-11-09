@@ -4,6 +4,13 @@ mod paste;
 mod renderer_tests;
 mod state;
 
+use self::state::{LaidOutParagraph, State};
+use crate::{
+    document::{Mark, ParagraphView, TextBlockKind, TextSelection},
+    editor::{EditorAction, EditorState},
+    widget::state::ObservedPreedit,
+};
+use iced::advanced::text::Paragraph as _;
 use iced::{
     Border, Color, Element, Event, Font, Length, Pixels, Point, Rectangle, Size,
     advanced::{
@@ -20,15 +27,9 @@ use iced::{
     window,
 };
 
-use iced::advanced::text::Paragraph as _;
-
-use crate::{
-    document::{Mark, ParagraphView, TextBlockKind, TextSelection},
-    editor::{EditorAction, EditorState},
-    widget::state::ObservedPreedit,
-};
-
-use self::state::{LaidOutParagraph, State};
+#[cfg(feature = "perf-diagnostics")]
+#[cfg(feature = "perf-diagnostics")]
+use crate::diagnostics::{Counter, Diagnostics, Operation as DiagnosticOperation, Timing};
 
 const PADDING: f32 = 12.0;
 const PARAGRAPH_SPACING: f32 = 8.0;
@@ -41,6 +42,9 @@ pub struct RichEdit<'a, Message> {
     id: Option<Id>,
     on_action: Option<Box<dyn Fn(EditorAction) -> Message + 'a>>,
     link_color: Color,
+
+    #[cfg(feature = "perf-diagnostics")]
+    diagnostics: Option<&'a Diagnostics>,
 }
 
 impl<'a, Message> RichEdit<'a, Message> {
@@ -52,6 +56,9 @@ impl<'a, Message> RichEdit<'a, Message> {
             id: None,
             on_action: None,
             link_color: Color::from_rgb8(0, 102, 204),
+
+            #[cfg(feature = "perf-diagnostics")]
+            diagnostics: None,
         }
     }
 
@@ -78,6 +85,20 @@ impl<'a, Message> RichEdit<'a, Message> {
     pub fn link_color(mut self, color: Color) -> Self {
         self.link_color = color;
         self
+    }
+
+    /// Attaches an opt-in recorder without changing editor state.
+    #[cfg(feature = "perf-diagnostics")]
+    pub fn diagnostics(mut self, diagnostics: &'a Diagnostics) -> Self {
+        self.diagnostics = Some(diagnostics);
+        self
+    }
+
+    #[cfg(feature = "perf-diagnostics")]
+    fn record_cache_decision(&self, counter: Counter) {
+        if let Some(diagnostics) = self.diagnostics {
+            diagnostics.increment(counter);
+        }
     }
 }
 
@@ -343,6 +364,10 @@ where
     }
 
     fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) {
+        #[cfg(feature = "perf-diagnostics")]
+        let _layout_timing = self
+            .diagnostics
+            .and_then(|diagnostics| diagnostics.scope(Timing::Layout));
         let size = limits.resolve(self.width, self.height, Size::new(300.0, 300.0));
         tree.size = size;
 
@@ -350,15 +375,32 @@ where
         state.ime.synchronize(self.editor);
         let selection = self.editor.selection();
 
-        let views = match state.ime.preedit() {
-            Some(preedit) => self.editor.document().composition_paragraph_views(
-                selection,
-                preedit.content,
-                preedit.selection.as_ref().map(|range| range.end),
-                self.editor.stored_marks(),
-            ),
-            None => self.editor.document().paragraph_views(),
+        let views = {
+            #[cfg(feature = "perf-diagnostics")]
+            let _projection_timing = self.diagnostics.and_then(|diagnostics| {
+                let timing = if state.ime.preedit().is_some() {
+                    Timing::CompositionProjection
+                } else {
+                    Timing::Projection
+                };
+
+                diagnostics.scope(timing)
+            });
+
+            match state.ime.preedit() {
+                Some(preedit) => self.editor.document().composition_paragraph_views(
+                    selection,
+                    preedit.content,
+                    preedit.selection.as_ref().map(|range| range.end),
+                    self.editor.stored_marks(),
+                ),
+                None => self.editor.document().paragraph_views(),
+            }
         };
+        #[cfg(feature = "perf-diagnostics")]
+        if let Some(diagnostics) = self.diagnostics {
+            diagnostics.observe_layout(size.width, size.height, views.as_ref().ok().map(Vec::len));
+        }
         // Compare against the old projection before taking the layout entries.
         let content_changed = match &views {
             Ok(views) => {
@@ -429,16 +471,32 @@ where
 
                     let paragraph = match reusable {
                         Some(mut item) => match item.paragraph.compare(desired) {
-                            text::Difference::None => item.paragraph,
+                            text::Difference::None => {
+                                #[cfg(feature = "perf-diagnostics")]
+                                self.record_cache_decision(Counter::ParagraphReused);
+
+                                item.paragraph
+                            }
                             text::Difference::Bounds => {
+                                #[cfg(feature = "perf-diagnostics")]
+                                self.record_cache_decision(Counter::ParagraphResized);
+
                                 item.paragraph.resize(desired.bounds);
                                 item.paragraph
                             }
                             text::Difference::Shape => {
+                                #[cfg(feature = "perf-diagnostics")]
+                                self.record_cache_decision(Counter::ParagraphRebuilt);
+
                                 make_rich_paragraph(&view, content_width, font, self.link_color)
                             }
                         },
-                        None => make_rich_paragraph(&view, content_width, font, self.link_color),
+                        None => {
+                            #[cfg(feature = "perf-diagnostics")]
+                            self.record_cache_decision(Counter::ParagraphRebuilt);
+
+                            make_rich_paragraph(&view, content_width, font, self.link_color)
+                        }
                     };
                     let minimum_height = view.line_count() as f32 * line_height;
 
@@ -511,6 +569,10 @@ where
         _cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
+        #[cfg(feature = "perf-diagnostics")]
+        let _draw_timing = self
+            .diagnostics
+            .and_then(|diagnostics| diagnostics.scope(Timing::Draw));
         let bounds = layout.bounds();
 
         let Some(clip) = bounds.intersection(viewport) else {
@@ -729,6 +791,20 @@ where
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
+        #[cfg(feature = "perf-diagnostics")]
+        let _event_timing = self.diagnostics.and_then(|diagnostics| {
+            let timing = match event {
+                Event::Keyboard(_) => Timing::KeyboardEvent,
+                Event::Mouse(_) => Timing::PointerEvent,
+                Event::InputMethod(_) => Timing::ImeEvent,
+
+                Event::Window(window::Event::RedrawRequested(_)) => Timing::RedrawEvent,
+                _ => Timing::OtherEvent,
+            };
+
+            diagnostics.scope(timing)
+        });
+
         let state = tree.state.downcast_mut::<State>();
         state.ime.synchronize(self.editor);
         match event {
@@ -805,9 +881,19 @@ where
 
                 let local = state.content_position(mouse_position, bounds.position());
 
-                if let Some(position) = state.hit_test(local) {
+                let position = {
+                    #[cfg(feature = "perf-diagnostics")]
+                    let _hit_test_timing = self.diagnostics.and_then(|diagnostics| {
+                        diagnostics.operation_scope(DiagnosticOperation::HitTestClick)
+                    });
+
+                    state.hit_test(local)
+                };
+
+                if let Some(position) = position {
                     state.drag_anchor = Some(position);
                     shell.request_redraw();
+
                     shell.publish(on_action(EditorAction::SetSelection(
                         TextSelection::cursor(position),
                     )));
@@ -844,12 +930,21 @@ where
                     position.x.clamp(visible.x, visible.x + visible.width),
                     position.y.clamp(visible.y, visible.y + visible.height),
                 );
-
                 let local = state.content_position(clamped, bounds.position());
 
-                if let Some(head) = state.hit_test(local) {
+                let head = {
+                    #[cfg(feature = "perf-diagnostics")]
+                    let _hit_test_timing = self.diagnostics.and_then(|diagnostics| {
+                        diagnostics.operation_scope(DiagnosticOperation::HitTestDrag)
+                    });
+
+                    state.hit_test(local)
+                };
+
+                if let Some(head) = head {
                     let selection = TextSelection::new(anchor, head);
                     shell.request_redraw();
+
                     if selection != self.editor.selection() {
                         shell.publish(on_action(EditorAction::SetSelection(selection)));
                     }
@@ -970,14 +1065,24 @@ where
                 if let Some(down) = vertical_navigation_key(key, *modifiers) {
                     let selection = self.editor.selection();
 
-                    let preferred_x = state
-                        .preferred_x
-                        .or_else(|| state.caret_bounds(selection.head()).map(|bounds| bounds.x));
+                    let target = {
+                        #[cfg(feature = "perf-diagnostics")]
+                        let _navigation_timing = self.diagnostics.and_then(|diagnostics| {
+                            diagnostics.operation_scope(DiagnosticOperation::NavigationVertical)
+                        });
 
-                    if let Some(preferred_x) = preferred_x
-                        && let Some((position, affinity)) =
-                            state.vertical_target(selection.head(), down, preferred_x)
-                    {
+                        let preferred_x = state.preferred_x.or_else(|| {
+                            state.caret_bounds(selection.head()).map(|bounds| bounds.x)
+                        });
+
+                        preferred_x.and_then(|preferred_x| {
+                            state
+                                .vertical_target(selection.head(), down, preferred_x)
+                                .map(|(position, affinity)| (preferred_x, position, affinity))
+                        })
+                    };
+
+                    if let Some((preferred_x, position, affinity)) = target {
                         let selection = if modifiers.shift() {
                             TextSelection::new(selection.anchor(), position)
                         } else {
@@ -1001,9 +1106,16 @@ where
                 if let Some(end) = visual_line_boundary_key(key, *modifiers) {
                     let selection = self.editor.selection();
 
-                    if let Some((position, affinity)) =
+                    let target = {
+                        #[cfg(feature = "perf-diagnostics")]
+                        let _navigation_timing = self.diagnostics.and_then(|diagnostics| {
+                            diagnostics.operation_scope(DiagnosticOperation::NavigationLineBoundary)
+                        });
+
                         state.visual_line_boundary(selection.head(), end)
-                    {
+                    };
+
+                    if let Some((position, affinity)) = target {
                         let selection = if modifiers.shift() {
                             TextSelection::new(selection.anchor(), position)
                         } else {
@@ -1011,7 +1123,6 @@ where
                         };
 
                         state.drag_anchor = None;
-
                         state.preferred_x = None;
                         state.caret_hint = Some((position, affinity));
 

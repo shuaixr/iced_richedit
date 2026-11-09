@@ -33,6 +33,14 @@ Do not duplicate tests for behavior that `prosemirror` already documents and gua
 
 No Git history currently establishes a commit convention. Use concise, imperative subjects such as `Add document autosave`, and separate unrelated changes. Pull requests must explain the problem and solution, list verification steps, and link relevant issues. Include screenshots for visible UI changes and call out migrations or configuration changes.
 
+## Agent Editing Boundary
+
+Except for explicitly requested formatting-only changes, agents must never create, modify, delete, move, rename, or apply patches to project code, tests, examples, build configuration, or dependency files on the user's behalf, even when explicitly asked. This includes copying and pasting code and using scripts, generators, temporary worktrees, or temporary project copies to perform those edits indirectly. Provide code snippets or proposed diffs in the conversation, identify the exact file and location, and explain why each change is needed. The user applies all non-formatting changes.
+
+Agents may inspect files and run non-source-mutating checks against user-applied changes. Formatting-only edits, including manual formatting inside `serde_json::json!` and running `cargo fmt`, are allowed when explicitly requested by the user. Keep formatting within the requested scope and preserve behavior and data values. Otherwise, use `cargo fmt --check`. Report verification accurately; do not claim proposed code has been compiled or tested when it has not been applied and checked. If validation requires non-formatting edits, explain the required changes and ask the user to apply them first.
+
+Agents may create and maintain documentation, including plans, architecture notes, implementation guides, and review reports. Agents may update `AGENTS.md` when the user explicitly requests a policy change. Documentation permission does not authorize changes to code, tests, examples, build configuration, dependency files, or editor configuration. Code snippets in documentation are proposals for the user to apply, not permission to execute or install those changes. Explicitly requested formatting-only changes remain allowed under the preceding rule.
+
 ## Security & Agent Instructions
 
 Never commit secrets or local environment files. Provide sanitized examples such as `.env.example` and pin dependencies with the ecosystem lockfile.

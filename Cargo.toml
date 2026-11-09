@@ -16,6 +16,7 @@ unicode-segmentation = "1.13.3"
 [features]
 renderer-tests = ["iced/tiny-skia"]
 example-basic = ["iced/tiny-skia", "iced/fira-sans"]
+perf-diagnostics = []
 
 [[example]]
 name = "basic"
