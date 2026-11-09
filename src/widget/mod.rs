@@ -11,6 +11,7 @@ use crate::{
     widget::state::ObservedPreedit,
 };
 use iced::advanced::text::Paragraph as _;
+use iced::time::Instant;
 use iced::{
     Border, Color, Element, Event, Font, Length, Pixels, Point, Rectangle, Size,
     advanced::{
@@ -27,7 +28,6 @@ use iced::{
     window,
 };
 
-#[cfg(feature = "perf-diagnostics")]
 #[cfg(feature = "perf-diagnostics")]
 use crate::diagnostics::{Counter, Diagnostics, Operation as DiagnosticOperation, Timing};
 
@@ -424,6 +424,13 @@ where
             }
             _ => true,
         };
+        if (content_changed || selection_changed || preedit_changed)
+            && state.is_focused
+            && !state.window_unfocused
+        {
+            state.caret_blink.reset(Instant::now());
+        }
+
         let viewport_changed = state.observed_viewport != Some(size);
         let hint_matches_head = state
             .caret_hint
@@ -739,6 +746,9 @@ where
             if state.is_focused
                 && !state.window_unfocused
                 && !state.has_error
+                && self.on_action.is_some()
+                && state.caret_blink.is_visible()
+                && (selection.is_empty() || state.ime.preedit().is_some())
                 && state
                     .ime
                     .preedit()
@@ -834,6 +844,7 @@ where
             Event::Window(window::Event::Unfocused) => {
                 state.paste.cancel();
                 state.window_unfocused = true;
+                state.caret_blink.stop();
                 state.preferred_x = None;
                 state.drag_anchor = None;
                 state.caret_hint = None;
@@ -843,6 +854,11 @@ where
             }
             Event::Window(window::Event::Focused) => {
                 state.window_unfocused = false;
+
+                if state.is_focused {
+                    state.caret_blink.reset(Instant::now());
+                }
+
                 shell.request_redraw();
             }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
@@ -866,11 +882,14 @@ where
                 }
 
                 if !state.is_focused {
+                    state.caret_blink.stop();
                     return;
                 }
 
-                shell.capture_event();
+                state.caret_blink.reset(Instant::now());
+                shell.request_redraw();
 
+                shell.capture_event();
                 let Some(on_action) = &self.on_action else {
                     return;
                 };
@@ -1011,6 +1030,10 @@ where
                     state.paste.cancel();
                     shell.capture_event();
                     return;
+                }
+                if self.on_action.is_some() {
+                    state.caret_blink.reset(Instant::now());
+                    shell.request_redraw();
                 }
 
                 let clipboard_shortcut =
@@ -1157,6 +1180,28 @@ where
                 }
             }
             Event::Window(window::Event::RedrawRequested(_)) => {
+                let composing = state.ime.preedit().is_some();
+
+                let visible_viewport = layout
+                    .bounds()
+                    .intersection(viewport)
+                    .is_some_and(|visible| visible.width > 0.0 && visible.height > 0.0);
+
+                let active = state.is_focused
+                    && !state.window_unfocused
+                    && !state.has_error
+                    && self.on_action.is_some()
+                    && visible_viewport
+                    && (self.editor.selection().is_empty() || composing);
+
+                if let Some(deadline) =
+                    state
+                        .caret_blink
+                        .next_redraw(Instant::now(), active, composing)
+                {
+                    shell.request_redraw_at(deadline);
+                }
+
                 let input_method = if state.is_focused
                     && !state.window_unfocused
                     && !state.has_error

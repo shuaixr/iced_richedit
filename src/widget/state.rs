@@ -3,6 +3,7 @@ use crate::{
     widget::{ime::ImeState, paste::PasteState},
 };
 
+use iced::time::{Duration, Instant};
 use iced::{
     Color, Point, Rectangle, Size,
     advanced::{
@@ -13,6 +14,58 @@ use iced::{
 use unicode_segmentation::UnicodeSegmentation;
 
 const CARET_WIDTH: f32 = 1.5;
+const CARET_BLINK_INTERVAL: Duration = Duration::from_millis(500);
+
+#[derive(Debug, Default)]
+pub(super) struct CaretBlink {
+    started_at: Option<Instant>,
+    visible: bool,
+}
+
+impl CaretBlink {
+    pub(super) fn is_visible(&self) -> bool {
+        self.visible
+    }
+
+    pub(super) fn reset(&mut self, now: Instant) {
+        self.started_at = Some(now);
+        self.visible = true;
+    }
+
+    pub(super) fn stop(&mut self) {
+        self.started_at = None;
+        self.visible = false;
+    }
+
+    pub(super) fn next_redraw(
+        &mut self,
+        now: Instant,
+        active: bool,
+        composing: bool,
+    ) -> Option<Instant> {
+        if !active {
+            self.stop();
+            return None;
+        }
+
+        if composing {
+            self.started_at = None;
+            self.visible = true;
+            return None;
+        }
+
+        let started_at = *self.started_at.get_or_insert(now);
+        let elapsed = now.saturating_duration_since(started_at);
+
+        let interval_ns = CARET_BLINK_INTERVAL.as_nanos();
+        let phase = elapsed.as_nanos() / interval_ns;
+        let remaining_ns = interval_ns - elapsed.as_nanos() % interval_ns;
+
+        self.visible = phase.is_multiple_of(2);
+
+        Some(now + Duration::from_nanos(remaining_ns as u64))
+    }
+}
 
 /// Supplies the final empty row omitted by the pinned rich-text shaping path.
 /// Its geometry comes from the preceding actual layout run, without extra text.
@@ -72,6 +125,7 @@ pub(super) struct State {
     pub(super) content_height: f32,
     pub(super) observed_selection: Option<TextSelection>,
     pub(super) observed_viewport: Option<Size>,
+    pub(super) caret_blink: CaretBlink,
     pub(super) caret_hint: Option<(Position, CaretAffinity)>,
     pub(super) ime: ImeState,
     pub(super) preferred_x: Option<f32>,
@@ -87,11 +141,13 @@ impl Focusable for State {
 
     fn focus(&mut self) {
         self.is_focused = true;
+        self.caret_blink.reset(Instant::now());
     }
 
     fn unfocus(&mut self) {
         self.paste.cancel();
         self.is_focused = false;
+        self.caret_blink.stop();
         self.drag_anchor = None;
         self.caret_hint = None;
         self.preferred_x = None;
@@ -993,5 +1049,129 @@ mod tests {
             .expect("first row must exist");
 
         assert_eq!(first, initial);
+    }
+
+    #[test]
+    fn caret_blink_changes_phase_at_half_second_boundaries() {
+        use iced::time::{Duration, Instant};
+
+        let start = Instant::now();
+        let mut blink = super::CaretBlink::default();
+
+        blink.reset(start);
+
+        assert_eq!(
+            blink.next_redraw(start, true, false),
+            Some(start + Duration::from_millis(500))
+        );
+        assert!(blink.is_visible());
+
+        assert_eq!(
+            blink.next_redraw(start + Duration::from_millis(499), true, false,),
+            Some(start + Duration::from_millis(500))
+        );
+        assert!(blink.is_visible());
+
+        assert_eq!(
+            blink.next_redraw(start + Duration::from_millis(500), true, false,),
+            Some(start + Duration::from_millis(1000))
+        );
+        assert!(!blink.is_visible());
+
+        blink.next_redraw(start + Duration::from_millis(999), true, false);
+        assert!(!blink.is_visible());
+
+        assert_eq!(
+            blink.next_redraw(start + Duration::from_millis(1000), true, false,),
+            Some(start + Duration::from_millis(1500))
+        );
+        assert!(blink.is_visible());
+
+        blink.next_redraw(start + Duration::from_millis(1750), true, false);
+        assert!(!blink.is_visible());
+    }
+
+    #[test]
+    fn resetting_caret_blink_starts_a_new_visible_interval() {
+        use iced::time::{Duration, Instant};
+
+        let start = Instant::now();
+        let mut blink = super::CaretBlink::default();
+
+        blink.reset(start);
+        blink.next_redraw(start + Duration::from_millis(600), true, false);
+        assert!(!blink.is_visible());
+
+        let reset_at = start + Duration::from_millis(800);
+        blink.reset(reset_at);
+
+        assert!(blink.is_visible());
+
+        assert_eq!(
+            blink.next_redraw(reset_at, true, false),
+            Some(reset_at + Duration::from_millis(500))
+        );
+
+        blink.next_redraw(reset_at + Duration::from_millis(499), true, false);
+        assert!(blink.is_visible());
+
+        blink.next_redraw(reset_at + Duration::from_millis(500), true, false);
+        assert!(!blink.is_visible());
+    }
+
+    #[test]
+    fn inactive_caret_stops_scheduling_and_restarts_visible() {
+        use iced::time::{Duration, Instant};
+
+        let start = Instant::now();
+        let mut blink = super::CaretBlink::default();
+
+        blink.reset(start);
+
+        assert_eq!(
+            blink.next_redraw(start + Duration::from_millis(100), false, false,),
+            None
+        );
+        assert!(!blink.is_visible());
+
+        let resumed_at = start + Duration::from_millis(2000);
+
+        assert_eq!(
+            blink.next_redraw(resumed_at, true, false),
+            Some(resumed_at + Duration::from_millis(500))
+        );
+        assert!(blink.is_visible());
+    }
+
+    #[test]
+    fn composition_keeps_caret_visible_without_blink_redraws() {
+        use iced::time::{Duration, Instant};
+
+        let start = Instant::now();
+        let mut blink = super::CaretBlink::default();
+
+        blink.reset(start);
+        blink.next_redraw(start + Duration::from_millis(500), true, false);
+        assert!(!blink.is_visible());
+
+        assert_eq!(
+            blink.next_redraw(start + Duration::from_millis(600), true, true,),
+            None
+        );
+        assert!(blink.is_visible());
+
+        assert_eq!(
+            blink.next_redraw(start + Duration::from_millis(8000), true, true,),
+            None
+        );
+        assert!(blink.is_visible());
+
+        let committed_at = start + Duration::from_millis(8100);
+
+        assert_eq!(
+            blink.next_redraw(committed_at, true, false),
+            Some(committed_at + Duration::from_millis(500))
+        );
+        assert!(blink.is_visible());
     }
 }
